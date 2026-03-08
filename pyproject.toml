@@ -1,0 +1,33 @@
+[build-system]
+requires = ["setuptools>=61.0", "wheel", "torch>=2.0.0", "pybind11>=2.10.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "qwen3-from-scratch"
+version = "0.1.0"
+description = "Add your description here"
+readme = "README.md"
+requires-python = ">=3.12"
+dependencies = [
+    "pytest>=9.0.2",
+    "python-dotenv>=1.2.1",
+    "safetensors>=0.4.0",
+    "tokenizers>=0.22.2",
+    "torch>=2.0.0",
+    "transformers>=5.2.0",
+]
+[tool.black]
+line-length=79
+
+[tool.ruff]
+line-length = 79
+target-version = "py312"
+
+[tool.ruff.lint]
+select = ["E", "F", "I"] # 开启错误、警告和 Import 排序
+ignore = ["E501"]        # 忽略单行过长的警告
+
+[dependency-groups]
+dev = [
+    "ruff>=0.15.5",
+]
