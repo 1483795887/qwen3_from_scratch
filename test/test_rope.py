@@ -10,6 +10,7 @@ from transformers.models.qwen3.modeling_qwen3 import (
 from qwen3_from_scratch.factory import ComponentFactory
 from qwen3_from_scratch.models.context import ModelContext
 
+
 @pytest.mark.parametrize("component_type", ["base"])
 def test_rope(model_config, component_type, device):
     shape = (2, 16, 1024, 128)
