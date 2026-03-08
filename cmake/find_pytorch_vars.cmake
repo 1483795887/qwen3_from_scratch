@@ -33,9 +33,3 @@ execute_process(
     OUTPUT_VARIABLE TORCH_LIB_DIR
     OUTPUT_STRIP_TRAILING_WHITESPACE
 )
-
-execute_process(
-    COMMAND ${UV_PYTHON} -c "import pybind11; print(pybind11.get_cmake_dir())"
-    OUTPUT_VARIABLE PYBIND11_CMAKE_DIR
-    OUTPUT_STRIP_TRAILING_WHITESPACE
-)
