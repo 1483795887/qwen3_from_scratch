@@ -1,6 +1,7 @@
 import os
 
 import pytest
+import torch
 from transformers import Qwen3Config
 
 from qwen3_from_scratch.factory import load_from_file
