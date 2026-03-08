@@ -2,6 +2,8 @@ import torch
 from torch import nn
 
 from qwen3_from_scratch.factory import ComponentFactory, ModelConfig
+from qwen3_from_scratch.models.parameter_loader import ParameterLoader
+from qwen3_from_scratch.models.common import assign
 
 @ComponentFactory.register("norm", "base")
 class TorchRmsNorm(nn.Module):
@@ -18,3 +20,6 @@ class TorchRmsNorm(nn.Module):
         return nn.functional.rms_norm(
             x, self.weight.shape, self.weight, self.eps
         ).to(input_dtype)
+
+    def load_state(self, loader: ParameterLoader):
+        self.weight = assign(self.weight, loader.get(self.name + ".weight"))
