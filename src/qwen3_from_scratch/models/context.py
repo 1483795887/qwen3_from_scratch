@@ -10,5 +10,7 @@ class PositionEmbeddings:
 
 @dataclass
 class ModelContext:
+    dtype: torch.dtype = torch.bfloat16
     position_ids: torch.Tensor = None
     position_embeddings: PositionEmbeddings = None
+    cache_position: int = 0
