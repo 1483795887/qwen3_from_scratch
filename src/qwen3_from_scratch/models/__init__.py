@@ -1,3 +1,3 @@
-from . import attn, norm
+from . import attn, norm, rope
 
-__all__ = ["attn", "norm"]
+__all__ = ["attn", "norm", "rope"]
