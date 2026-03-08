@@ -1,3 +1,3 @@
-from . import attn, norm, rope, feedback
+from . import attn, feedback, norm, rope, self_attn
 
-__all__ = ["attn", "norm", "rope", "feedback"]
+__all__ = ["attn", "norm", "rope", "feedback", self_attn]
