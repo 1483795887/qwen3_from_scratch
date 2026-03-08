@@ -1,8 +1,9 @@
+import torch
 from torch import nn
 
 from qwen3_from_scratch.factory import ComponentFactory, ModelConfig
 from qwen3_from_scratch.models.common import assign
-from qwen3_from_scratch.models.context import ModelContext
+from qwen3_from_scratch.models.context import KVCache, ModelContext
 from qwen3_from_scratch.models.parameter_loader import ParameterLoader
 
 
@@ -40,6 +41,16 @@ class SelfAttention(nn.Module):
         v = self.v_proj(x).view(hidden_shape).transpose(1, 2)
         q = self.rope(q, context)
         k = self.rope(k, context)
+        if context.use_cache:
+            if self.layer_idx not in context.kv_cache:
+                context.kv_cache[self.layer_idx] = KVCache(k, v)
+            else:
+                kv_cache = context.kv_cache[self.layer_idx]
+                # TODO: 改成预分配+动态增加的形式
+                k = torch.cat([kv_cache.k_cache, k], dim=2)
+                v = torch.cat([kv_cache.v_cache, v], dim=2)
+                context.kv_cache[self.layer_idx].k_cache = k
+                context.kv_cache[self.layer_idx].v_cache = v
         o = (
             self.gqa(q, k, v)
             .transpose(1, 2)
