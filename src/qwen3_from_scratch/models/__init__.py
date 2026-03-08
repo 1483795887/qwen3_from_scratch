@@ -1,5 +1,3 @@
-from . import attn
+from . import attn, norm
 
-__all__ = [
-    "attn",
-]
+__all__ = ["attn", "norm"]
