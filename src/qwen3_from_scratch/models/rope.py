@@ -2,7 +2,10 @@ import torch
 from torch import nn
 
 from qwen3_from_scratch.factory import ComponentFactory, ModelConfig
-from qwen3_from_scratch.inference.context import ModelContext, PositionEmbeddings
+from qwen3_from_scratch.inference.context import (
+    ModelContext,
+    PositionEmbeddings,
+)
 
 
 @ComponentFactory.register("rope", "base")

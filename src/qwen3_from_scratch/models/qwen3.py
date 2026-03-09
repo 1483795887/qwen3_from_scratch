@@ -2,8 +2,8 @@ import torch
 from torch import nn
 
 from qwen3_from_scratch.factory import ComponentFactory, ModelConfig
-from qwen3_from_scratch.models.common import assign
 from qwen3_from_scratch.inference.context import ModelContext
+from qwen3_from_scratch.models.common import assign
 from qwen3_from_scratch.models.parameter_loader import ParameterLoader
 
 
