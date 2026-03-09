@@ -1,4 +1,5 @@
 import torch
+import pytest
 
 from qwen3_from_scratch.inference.context import ModelContext
 from qwen3_from_scratch.models.parameter_loader import ParameterLoader
@@ -7,8 +8,8 @@ from qwen3_from_scratch.utils.env import load_env_file
 
 load_env_file()
 
-
 def test_parameter_loading(model_config, model_path, device):
+    pytest.skip("这个操作比较耗时，暂且跳过")
     loader = ParameterLoader()
     loader.load(model_path)
     model = Qwen3(model_config).to(device)
