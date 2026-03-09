@@ -41,15 +41,7 @@ class SelfAttention(nn.Module):
         q = self.rope(q, context)
         k = self.rope(k, context)
         if context.use_cache:
-            if self.layer_idx not in context.kv_cache:
-                context.kv_cache[self.layer_idx] = KVCache(k, v)
-            else:
-                kv_cache = context.kv_cache[self.layer_idx]
-                # TODO: 改成预分配+动态增加的形式
-                k = torch.cat([kv_cache.k_cache, k], dim=2)
-                v = torch.cat([kv_cache.v_cache, v], dim=2)
-                context.kv_cache[self.layer_idx].k_cache = k
-                context.kv_cache[self.layer_idx].v_cache = v
+            k,v = context.kv_cache.update(k, v, self.layer_idx)
         o = (
             self.gqa(q, k, v)
             .transpose(1, 2)

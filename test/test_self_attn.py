@@ -8,7 +8,6 @@ from qwen3_from_scratch.factory import ComponentFactory
 from qwen3_from_scratch.inference.context import ModelContext
 from qwen3_from_scratch.inference.kv_cache.simple_kv_cache import SimpleKVCache
 from qwen3_from_scratch.models.attn import create_causal_attention_mask
-from qwen3_from_scratch.inference.context import KVCache, ModelContext
 from qwen3_from_scratch.models.parameter_loader import ParameterLoader
 
 
@@ -55,7 +54,7 @@ def test_self_attn_shape_correct_with_kv_cache(
     cache_v = torch.randn(
         2, model_config.num_key_value_heads, 100, model_config.head_dim
     ).to(device)
-    context.kv_cache = {3: KVCache(cache_k, cache_v)}
+    context.kv_cache.update(cache_k, cache_v, 3)
     context.use_cache = True
 
     with torch.no_grad():
@@ -116,7 +115,8 @@ def test_self_attn_output_close_to_transformers_with_kv_cache(
     cache_v = torch.randn(
         2, model_config.num_key_value_heads, 100, model_config.head_dim
     ).to(device)
-    context.kv_cache = {3: KVCache(cache_k, cache_v)}
+    context.kv_cache = SimpleKVCache()
+    context.kv_cache.update(cache_k, cache_v, 3)
     context.use_cache = True
 
     past_key_values.update(cache_k, cache_v, 3)
