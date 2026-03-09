@@ -7,8 +7,8 @@ from transformers.models.qwen3.modeling_qwen3 import (
 )
 
 from qwen3_from_scratch.factory import ComponentFactory
-from qwen3_from_scratch.models.attn import create_causal_attention_mask
 from qwen3_from_scratch.inference.context import ModelContext
+from qwen3_from_scratch.models.attn import create_causal_attention_mask
 from qwen3_from_scratch.models.parameter_loader import ParameterLoader
 
 

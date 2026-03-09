@@ -1,4 +1,3 @@
-from copy import deepcopy
 
 import pytest
 import torch
@@ -6,6 +5,8 @@ from transformers import DynamicCache
 from transformers.models.qwen3.modeling_qwen3 import Qwen3Attention
 
 from qwen3_from_scratch.factory import ComponentFactory
+from qwen3_from_scratch.inference.context import ModelContext
+from qwen3_from_scratch.inference.kv_cache.simple_kv_cache import SimpleKVCache
 from qwen3_from_scratch.models.attn import create_causal_attention_mask
 from qwen3_from_scratch.inference.context import KVCache, ModelContext
 from qwen3_from_scratch.models.parameter_loader import ParameterLoader
