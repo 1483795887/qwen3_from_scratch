@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.18)
-project(qwen3_from_scratch_kernels LANGUAGES CXX CUDA)
+project(qwen3_from_scratch_kernels LANGUAGES CXX)
 set(CMAKE_BUILD_TYPE Release)
 
 include(cmake/find_pytorch_vars.cmake)
