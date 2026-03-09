@@ -15,6 +15,7 @@ class SimpleKVCache(KVCache):
         k: torch.Tensor,
         v: torch.Tensor,
         layer_idx: int,
+        cache_position: int = 0,
     ) -> tuple[torch.Tensor, torch.Tensor]:
         if self.k_cache[layer_idx] is None:
             self.k_cache[layer_idx] = k
