@@ -1,6 +1,6 @@
 import torch
 
-from qwen3_from_scratch.models.context import ModelContext
+from qwen3_from_scratch.inference.context import ModelContext
 from qwen3_from_scratch.models.parameter_loader import ParameterLoader
 from qwen3_from_scratch.models.qwen3 import Qwen3
 from qwen3_from_scratch.utils.env import load_env_file
