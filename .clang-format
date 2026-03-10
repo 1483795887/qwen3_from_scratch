@@ -1,0 +1,18 @@
+# 基础 C++ 格式化规则（可根据自己习惯调整）
+BasedOnStyle: LLVM
+IndentWidth: 4
+TabWidth: 4
+UseTab: Never
+ColumnLimit: 120
+PointerAlignment: Left
+SpaceBeforeParens: ControlStatements
+BinPackArguments: false
+BinPackParameters: false
+# 兼容 CUDA 关键字（避免格式化出错）
+Language: Cpp
+# 支持 CUDA 特有语法（如 __global__/__device__/__shared__）
+SortIncludes: false
+IncludeBlocks: Preserve
+# 对 CUDA 核函数的特殊处理
+AlignAfterOpenBracket: Align
+AllowShortFunctionsOnASingleLine: Inline
