@@ -1,5 +1,5 @@
-import torch
 import pytest
+import torch
 
 from qwen3_from_scratch.inference.context import ModelContext
 from qwen3_from_scratch.models.parameter_loader import ParameterLoader

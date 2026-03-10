@@ -5,20 +5,23 @@
 #include <device_launch_parameters.h>
 
 template <typename T, size_t blockSize>
-__global__ void rms_norm_kernel(const T *x, T *output, const T *gamma, const int seqLen, const int hiddenDim, const int hiddenDimStride, const float eps)
+__global__ void rms_norm_kernel_(const T  * __restrict__ x, T  * __restrict__ output, const T * __restrict__ gamma, const int seqLen, const int hiddenDim, const int hiddenDimStride, const float eps)
 {
     uint32_t tid = threadIdx.x;
     uint32_t blockId = blockIdx.x;
-    x += blockId * hiddenDimStride; // 如果是连续，hiddenDimStride就是 hiddenDim
+    __shared__ float s_x[blockSize];
+    __shared__ float s_gamma[blockSize];
+    const T* x_ptr = x + blockId * hiddenDimStride; // 如果是连续，hiddenDimStride就是 hiddenDim
     output += blockId * hiddenDim /* *1 output是刚申请的，stride肯定是1*/;
 
     float sumSq = 0.0f;
     for (uint32_t i = tid; i < hiddenDim; i += blockSize)
     {
-        const float x_i = static_cast<float>(x[i]);
-        sumSq += x_i * x_i;
+        s_x[tid] = static_cast<float>(x_ptr[i]);
+        s_gamma[tid] = static_cast<float>(gamma[i]);
+        sumSq += s_x[tid] * s_x[tid];
     }
-
+    __syncthreads();
     sumSq = warp_reduce_sum(sumSq);
     if constexpr (blockSize > WARP_SIZE)
     {
@@ -43,25 +46,16 @@ __global__ void rms_norm_kernel(const T *x, T *output, const T *gamma, const int
 
     for (uint32_t i = tid; i < hiddenDim; i += blockSize)
     {
-        output[i] = static_cast<T>(static_cast<float>(x[i]) * scale * static_cast<float>(gamma[i]));
+        output[i] = static_cast<T>(s_x[tid] * scale * s_gamma[tid]);
     }
 }
 
 template <typename T>
-void rms_norm_kernel(const T *x, T *output, const T *gamma, const int seqLen, const int hiddenDim, const int hiddenDimStride, const float eps)
+void rms_norm_kernel(const T * __restrict__ x, T * __restrict__ output, const T * __restrict__ gamma, const int seqLen, const int hiddenDim, const int hiddenDimStride, const float eps)
 {
-    const dim3 gridSize(seqLen);
-
-    if (hiddenDim < 1024)
-    {
-        const dim3 blockSize(256);
-        rms_norm_kernel<T, 256><<<gridSize, blockSize>>>(x, output, gamma, seqLen, hiddenDim, hiddenDimStride, eps);
-    }
-    else
-    {
-        const dim3 blockSize(1024);
-        rms_norm_kernel<T, 1024><<<gridSize, blockSize>>>(x, output, gamma, seqLen, hiddenDim, hiddenDimStride, eps);
-    }
+    const dim3 grid(seqLen);
+    dim3 block(32);
+    rms_norm_kernel_<T, 32><<<grid, block>>>(x, output, gamma, seqLen, hiddenDim, hiddenDimStride, eps);
 }
 
 torch::Tensor rms_norm_forward_cuda(const torch::Tensor &x, const torch::Tensor &gamma, const float eps)

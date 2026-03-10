@@ -5,8 +5,8 @@
 
 constexpr int WARP_SIZE = 32;
 
-template <int width = WARP_SIZE>
-__device__ __forceinline__ float warp_reduce_sum(float x)
+template <int width = WARP_SIZE, typename T>
+__device__ __forceinline__ T warp_reduce_sum(T x)
 {
 #pragma unroll
     for (int offset = width / 2; offset > 0; offset >>= 1)
