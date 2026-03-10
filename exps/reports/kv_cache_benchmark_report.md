@@ -44,7 +44,7 @@
 
 ### 可视化结果
 
-![KV Cache 性能对比图](pics/kv_cache_benchmark.png)
+![KV Cache 性能对比图](../../pics/kv_cache_benchmark.png)
 
 *上图展示了每个 token 的生成时间和累积时间随生成 token 数量的变化趋势*
 
