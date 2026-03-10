@@ -548,7 +548,7 @@ def main():
         gpu_results_no_cache = []
     
     # 生成图表
-    chart_path = "pics/kv_cache_benchmark.png"
+    chart_path = "../../pics/kv_cache_benchmark.png"
     print("\n生成性能对比图表...")
     plot_results(
         cpu_results_cache,
