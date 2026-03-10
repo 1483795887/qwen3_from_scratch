@@ -19,6 +19,14 @@ if(CMAKE_CUDA_COMPILER)
     message(STATUS "✅ 检测到 CUDA，将编译 CUDA 版本算子）")
     add_definitions(-DUSE_CUDA)
     list(APPEND SOURCES ${CUDA_SOURCES})
+    set(CMAKE_CUDA_FLAGS "${CMAKE_CUDA_FLAGS} \
+        -O3 \
+        -std=c++17 \
+        -U__CUDA_NO_HALF_OPERATORS__ \
+        -U__CUDA_NO_HALF_CONVERSIONS__ \
+        --expt-relaxed-constexpr \
+        --expt-extended-lambda \
+        ${CUDA_ARCH_FLAGS}")
 else()
     message(STATUS "⚠️ 未检测到 CUDA，仅编译 CPU 版本算子")
 endif()
