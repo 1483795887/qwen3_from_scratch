@@ -7,12 +7,12 @@
 
 template <typename T, size_t blockSize>
 __global__ void rms_norm_kernel_vec(const T* __restrict__ x,
-                                     T* __restrict__ output,
-                                     const T* __restrict__ gamma,
-                                     const int seqLen,
-                                     const int hiddenDim,
-                                     const int hiddenDimStride,
-                                     const float eps) {
+                                    T* __restrict__ output,
+                                    const T* __restrict__ gamma,
+                                    const int seqLen,
+                                    const int hiddenDim,
+                                    const int hiddenDimStride,
+                                    const float eps) {
     uint32_t tid = threadIdx.x;
     uint32_t blockId = blockIdx.x;
     const T* x_ptr = x + blockId * hiddenDimStride;
@@ -56,21 +56,24 @@ __global__ void rms_norm_kernel_vec(const T* __restrict__ x,
             float4 vecGamma = reinterpret_cast<const float4*>(gamma + baseIdx)[0];
             float4 result;
             result.x = vecX.x * scale * vecGamma.x;
-            if (remaining > 1) result.y = vecX.y * scale * vecGamma.y;
-            if (remaining > 2) result.z = vecX.z * scale * vecGamma.z;
-            if (remaining > 3) result.w = vecX.w * scale * vecGamma.w;
+            if (remaining > 1)
+                result.y = vecX.y * scale * vecGamma.y;
+            if (remaining > 2)
+                result.z = vecX.z * scale * vecGamma.z;
+            if (remaining > 3)
+                result.w = vecX.w * scale * vecGamma.w;
             reinterpret_cast<float4*>(output + baseIdx)[0] = result;
         }
     }
 }
 
 template <typename T, size_t blockSize, size_t hiddenDim>
-__global__ void rms_norm_kernel(const T* __restrict__ x,
-                                 T* __restrict__ output,
-                                 const T* __restrict__ gamma,
-                                 const int seqLen,
-                                 const int hiddenDimStride,
-                                 const float eps) {
+__global__ void rms_norm_kernel_arr(const T* __restrict__ x,
+                                    T* __restrict__ output,
+                                    const T* __restrict__ gamma,
+                                    const int seqLen,
+                                    const int hiddenDimStride,
+                                    const float eps) {
     uint32_t tid = threadIdx.x;
     uint32_t blockId = blockIdx.x;
     const T* x_ptr = x + blockId * hiddenDimStride; // 如果是连续，hiddenDimStride就是 hiddenDim
@@ -83,7 +86,7 @@ __global__ void rms_norm_kernel(const T* __restrict__ x,
     for (uint32_t i = tid; i < hiddenDim; i += blockSize) {
         tempX[tempXj] = x_ptr[i];
         sumSq += tempX[tempXj] * tempX[tempXj];
-        tempXj ++;
+        tempXj++;
     }
     sumSq = warp_reduce_sum(sumSq);
     if constexpr (blockSize > WARP_SIZE) {
@@ -108,7 +111,7 @@ __global__ void rms_norm_kernel(const T* __restrict__ x,
 #pragma unroll
     for (uint32_t i = tid; i < hiddenDim; i += blockSize) {
         output[i] = static_cast<T>(tempX[tempXj] * scale * gamma[i]);
-        tempXj ++;
+        tempXj++;
     }
 }
 
@@ -123,7 +126,7 @@ void rms_norm_kernel(const T* __restrict__ x,
     const dim3 grid(seqLen);
     if (hiddenDim <= 64) {
         dim3 block(WARP_SIZE);
-        rms_norm_kernel_vec<T, 64><<<grid, block>>>(x, output, gamma, seqLen,hiddenDim, hiddenDimStride, eps);
+        rms_norm_kernel_vec<T, 64><<<grid, block>>>(x, output, gamma, seqLen, hiddenDim, hiddenDimStride, eps);
     } else if (hiddenDim <= 256) {
         dim3 block(64);
         rms_norm_kernel_vec<T, 64><<<grid, block>>>(x, output, gamma, seqLen, hiddenDim, hiddenDimStride, eps);
@@ -154,13 +157,8 @@ torch::Tensor rms_norm_forward_cuda(const torch::Tensor& x, const torch::Tensor&
                                   stride,
                                   eps);
     } else if (x.dtype() == torch::kF32) {
-        rms_norm_kernel<float>(x.data_ptr<float>(),
-                               output.data_ptr<float>(),
-                               gamma.data_ptr<float>(),
-                               seqLen,
-                               hiddenDim,
-                               stride,
-                               eps);
+        rms_norm_kernel<float>(
+            x.data_ptr<float>(), output.data_ptr<float>(), gamma.data_ptr<float>(), seqLen, hiddenDim, stride, eps);
     } else if (x.dtype() == torch::kBFloat16) {
         rms_norm_kernel<at::BFloat16>(x.data_ptr<at::BFloat16>(),
                                       output.data_ptr<at::BFloat16>(),
