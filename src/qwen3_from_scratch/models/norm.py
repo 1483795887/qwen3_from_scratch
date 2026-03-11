@@ -33,7 +33,4 @@ class MyRmsNorm(TorchRmsNorm):
         self.forward_func = rms_norm_forward
 
     def forward(self, x):
-        input_shape = x.shape
-        return self.forward_func(
-            x.reshape(-1, input_shape[-1]), self.weight, self.eps
-        ).reshape(x.shape)
+        return self.forward_func(x, self.weight, self.eps)

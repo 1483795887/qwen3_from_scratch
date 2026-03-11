@@ -33,8 +33,9 @@ void rms_norm_forward_(const T* x,
 
 // -------------------------- RMSNorm CPU实现 --------------------------
 torch::Tensor rms_norm_forward_cpu(const torch::Tensor& x, const torch::Tensor& gamma, const float eps = 1e-6f) {
-    const int seqLen = x.size(0);
-    const int hiddenDim = x.size(1);
+    const int hiddenDim = x.size(-1);
+    const int stride = x.stride(-2);
+    const int seqLen = x.numel() / hiddenDim;
 
     auto output = torch::empty_like(x);
 
@@ -44,7 +45,7 @@ torch::Tensor rms_norm_forward_cpu(const torch::Tensor& x, const torch::Tensor& 
                                     gamma.data_ptr<at::Half>(),
                                     seqLen,
                                     hiddenDim,
-                                    x.stride(0),
+                                    stride,
                                     eps);
     } else if (x.dtype() == torch::kF32) {
         rms_norm_forward_<float>(x.data_ptr<float>(),
@@ -52,7 +53,7 @@ torch::Tensor rms_norm_forward_cpu(const torch::Tensor& x, const torch::Tensor& 
                                  gamma.data_ptr<float>(),
                                  seqLen,
                                  hiddenDim,
-                                 x.stride(0),
+                                 stride,
                                  eps);
     } else if (x.dtype() == torch::kBFloat16) {
         rms_norm_forward_<at::BFloat16>(x.data_ptr<at::BFloat16>(),
@@ -60,7 +61,7 @@ torch::Tensor rms_norm_forward_cpu(const torch::Tensor& x, const torch::Tensor& 
                                         gamma.data_ptr<at::BFloat16>(),
                                         seqLen,
                                         hiddenDim,
-                                        x.stride(0),
+                                        stride,
                                         eps);
     }
 
@@ -72,7 +73,7 @@ torch::Tensor rms_norm_forward(const torch::Tensor& x, const torch::Tensor& gamm
     TORCH_CHECK(x.dtype() == torch::kBFloat16 || x.dtype() == torch::kFloat16 || x.dtype() == torch::kFloat32,
                 "Only support BF16/FP16/FP32");
     TORCH_CHECK(gamma.dtype() == x.dtype(), "x和gamma的数据类型必须相同");
-    TORCH_CHECK(x.size(1) == gamma.size(0), "gamma的维度必须等于x的hidden_dim");
+    TORCH_CHECK(x.size(-1) == gamma.size(-1), "gamma的维度必须等于x的hidden_dim");
 #ifdef USE_CUDA
     // 根据输入设备自动选择CPU/CUDA版本
     if (x.is_cuda()) {
