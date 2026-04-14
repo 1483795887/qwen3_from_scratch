@@ -16,6 +16,7 @@
 - **更多算子开发中**：Flash Attention (Triton)、Rotary Embedding等
 
 ### 项目结构
+```
 qwen3_from_scratch/
 ├── src/qwen3_from_scratch/  # Python模型实现
 │   ├── models/              # 模型架构
@@ -26,7 +27,7 @@ qwen3_from_scratch/
 ├── test/                    # 测试用例
 └── exps/                    # 性能实验
     └── reports/             # 性能报告
-
+```
 
 ## 验证方法
 基于 `transformers` 库作为基准，在相同输入和相同参数的条件下，对比输出结果的一致性，验证各组件实现的正确性。
