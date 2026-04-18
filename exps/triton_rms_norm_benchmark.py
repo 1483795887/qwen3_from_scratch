@@ -19,7 +19,7 @@ for dtype in [torch.float32, torch.float16, torch.bfloat16]:
     configs.append(
         triton.testing.Benchmark(
             x_names=["D"],
-            x_vals=[128 * i for i in range(2, 33)],
+            x_vals=[128 * i for i in range(1, 33)],
             line_arg="provider",
             line_vals=["base", "my_op", "cpp"],
             line_names=["Torch", "triton", "CUDA"],
@@ -49,8 +49,8 @@ def benchmark(D: int, provider: PROVIDERS, dtype: torch.dtype):
     ms, min_ms, max_ms = triton.testing.do_bench(
         lambda: norm_op(a), quantiles=quantiles
     )
-    # 平方，计算量D，求和，计算量D，乘以gamma，计算量D，除以系数，计算量 D，共 5D
-    perf = lambda ms: 5 * D * 1e-12 / (ms * 1e-3)
+    # 平方，计算量D，求和，计算量D，乘以gamma，计算量系数，计算量系数，计算量 D，共 5D
+    perf = lambda ms: 5 * D * 1e-12 / (ms * 1e-3) * dtype.itemsize
     return perf(ms), perf(max_ms), perf(min_ms)
 
 
