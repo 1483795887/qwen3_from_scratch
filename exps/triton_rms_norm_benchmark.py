@@ -19,7 +19,7 @@ for dtype in [torch.float32, torch.float16, torch.bfloat16]:
     configs.append(
         triton.testing.Benchmark(
             x_names=["D"],
-            x_vals=[128 * i for i in range(1, 33)],
+            x_vals=[128 * i for i in range(1, 64)],
             line_arg="provider",
             line_vals=["base", "my_op", "cpp"],
             line_names=["Torch", "triton", "CUDA"],
