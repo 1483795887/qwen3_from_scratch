@@ -126,7 +126,7 @@ void rms_norm_kernel(const T* __restrict__ x,
     const dim3 grid(seqLen);
     if (hiddenDim <= 64) {
         dim3 block(WARP_SIZE);
-        rms_norm_kernel_vec<T, 64><<<grid, block>>>(x, output, gamma, seqLen, hiddenDim, hiddenDimStride, eps);
+        rms_norm_kernel_vec<T, WARP_SIZE><<<grid, block>>>(x, output, gamma, seqLen, hiddenDim, hiddenDimStride, eps);
     } else if (hiddenDim <= 256) {
         dim3 block(64);
         rms_norm_kernel_vec<T, 64><<<grid, block>>>(x, output, gamma, seqLen, hiddenDim, hiddenDimStride, eps);
