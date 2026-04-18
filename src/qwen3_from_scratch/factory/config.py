@@ -16,23 +16,23 @@ class ComponentConfig:
 
 @dataclass
 class ModelConfig:
-    vocab_size: int
-    hidden_size: int
-    hidden_act: ACTIVATIONS
-    num_hidden_layers: int
-    max_position_embeddings: int
-    eos_token_id: int
+    vocab_size: int = 151936
+    hidden_size: int = 1024
+    hidden_act: ACTIVATIONS = "silu"
+    num_hidden_layers: int = 28
+    max_position_embeddings: int = 40960
+    eos_token_id: int = 151645
 
-    num_key_value_heads: int
-    num_attention_heads: int
-    head_dim: int
-    intermediate_size: int
+    num_key_value_heads: int = 8
+    num_attention_heads: int = 16
+    head_dim: int = 128
+    intermediate_size: int = 4096
 
-    norm_type: NORM_TYPE
-    norm_params: dict
+    norm_type: NORM_TYPE = "rms_norm"
+    norm_params: dict = field(default_factory=dict)
 
-    pos_embed_type: POS_EMBED_TYPE
-    pos_embed_params: dict
+    pos_embed_type: POS_EMBED_TYPE = "rope"
+    pos_embed_params: dict = field(default_factory=dict)
 
     self_attn: ComponentConfig = field(
         default_factory=lambda: ComponentConfig("base")
