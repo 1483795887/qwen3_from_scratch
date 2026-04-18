@@ -29,10 +29,10 @@ def get_cuda_autotune_config():
     ]
 
 
-@triton.autotune(
-    configs=get_cuda_autotune_config(),
-    key=["D"],
-)
+# @triton.autotune(
+#     configs=get_cuda_autotune_config(),
+#     key=["D"],
+# )
 @triton.jit
 def rms_norm_forward_kernel(
     x,
@@ -108,7 +108,7 @@ def rms_norm_forward(x: torch.Tensor, gamma: torch.Tensor, eps: float = 1e-5):
     # if (NEXT_POWER_OF_D > MAX_FUSED_SIZE):
     #     BLOCK_SIZE = MAX_FUSED_SIZE
     # else:
-    kernel_func = rms_norm_forward_kernel
+    kernel_func = rms_norm_forward_kernel_one_step
     kernel_func[grid](
         x,
         gamma,
@@ -116,5 +116,6 @@ def rms_norm_forward(x: torch.Tensor, gamma: torch.Tensor, eps: float = 1e-5):
         D,
         eps,
         D=D,
+        BLOCK_SIZE=triton.next_power_of_2(D),
     )
     return output
