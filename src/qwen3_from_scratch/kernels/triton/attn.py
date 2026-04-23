@@ -130,9 +130,8 @@ def softmax(
         row_start_ptr = A_ptr + row_idx * row_stride
         col_offsets = tl.arange(0, BLOCK_SIZE)
         input_ptr = row_start_ptr + col_offsets * col_stride
-        mask = (col_offsets < N) & (is_causal | (col_offsets >= row_idx))
-
-        row = tl.load(input_ptr, mask=mask, other=-float("inf"))
+        mask = col_offsets < N
+        row = tl.load(input_ptr, mask=mask & ((not is_causal) | (col_offsets <= row_idx)), other=-float("inf"))
         max_val = tl.max(row)
         row = row - max_val
         row = tl.exp(row)
@@ -185,7 +184,7 @@ def scaled_dot_production(
         BLOCK_SIZE_D,
     )
 
-    BLOCK_SIZE = 128
+    BLOCK_SIZE = triton.next_power_of_2(N)
     ROW_PER_BLOCK = 32
     grid = (triton.cdiv(M, ROW_PER_BLOCK), B * Hq)
     softmax[grid](
