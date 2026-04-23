@@ -118,3 +118,57 @@ def create_causal_attention_mask(seq_len, device, dtype):
     # 3. 扩展维度到 [1,1,seq_len,seq_len]（适配注意力分数的维度）
     attention_mask = attention_mask.unsqueeze(0).unsqueeze(0)
     return attention_mask
+
+
+@ComponentFactory.register("attn", "my_op")
+class MyAttn(nn.Module):
+    def __init__(self, config:ModelConfig) -> None:
+        super().__init__()
+        self.n_head_dim = config.head_dim
+
+    def forward(self, q, k, v):
+        if q.is_cuda:
+            from qwen3_from_scratch.kernels.triton.attn import scaled_dot_production
+            return scaled_dot_production(q, k, v, is_causal=True)
+        return self.cpu_forward(q, k, v, is_causal=True)
+        
+    def cpu_forward(self, q, k, v, is_causal: bool = True):
+        batch_size, head_q, seq_len_q, head_dim = q.shape
+        head_kv = k.shape[1]
+        
+        # 计算缩放因子
+        scale = self.n_head_dim ** -0.5
+        
+        # GQA: 将q的head分组，每组对应一个kv head
+        assert head_q % head_kv == 0, f"head_q ({head_q}) must be divisible by head_kv ({head_kv})"
+        n_groups = head_q // head_kv
+        
+        # 重塑q为 [batch, head_kv, n_groups, seq_len_q, head_dim]
+        q_reshaped = q.reshape(batch_size, head_kv, n_groups, seq_len_q, head_dim)
+        
+        # 扩展k和v的维度以匹配q的分组 [batch, head_kv, 1, seq_len_k, head_dim]
+        k_expanded = k.unsqueeze(2)
+        v_expanded = v.unsqueeze(2)
+        
+        # 计算注意力分数: [batch, head_kv, n_groups, seq_len_q, seq_len_k]
+        scores = torch.matmul(q_reshaped, k_expanded.transpose(-2, -1)) * scale
+        
+        # 应用因果掩码
+        seq_len_k = k.shape[2]
+        if seq_len_q > 1 and is_causal:
+            # 创建因果掩码
+            causal_mask = torch.tril(
+                torch.ones(seq_len_q, seq_len_k, device=q.device, dtype=torch.bool)
+            )
+            scores = scores.masked_fill(~causal_mask.unsqueeze(0).unsqueeze(0).unsqueeze(0), float('-inf'))
+        
+        # Softmax
+        attn_weights = torch.softmax(scores, dim=-1)
+        
+        # 计算输出: [batch, head_kv, n_groups, seq_len_q, head_dim]
+        out = torch.matmul(attn_weights, v_expanded)
+        
+        # 重塑回原始形状 [batch, head_q, seq_len_q, head_dim]
+        out = out.reshape(batch_size, head_q, seq_len_q, head_dim)
+        
+        return out
