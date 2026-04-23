@@ -128,8 +128,10 @@ class MyAttn(nn.Module):
 
     def forward(self, q, k, v):
         if q.is_cuda:
-            from qwen3_from_scratch.kernels.triton.attn import scaled_dot_production
-            return scaled_dot_production(q, k, v, is_causal=True)
+            # from qwen3_from_scratch.kernels.triton.attn import scaled_dot_production
+            # return scaled_dot_production(q, k, v, is_causal=True)
+            from qwen3_from_scratch.kernels.triton.attn import flash_attention
+            return flash_attention(q,k,v,is_causal=True)
         return self.cpu_forward(q, k, v, is_causal=True)
         
     def cpu_forward(self, q, k, v, is_causal: bool = True):

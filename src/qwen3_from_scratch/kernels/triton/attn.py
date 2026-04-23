@@ -218,6 +218,151 @@ def scaled_dot_production(
     return output
 
 
+@triton.jit
+def fused_attention(
+    Q,
+    K,
+    V,
+    output,
+    M,
+    N,
+    d,
+    scale,
+    stride_qh,
+    stride_qm,
+    stride_qd,
+    stride_kh,
+    stride_kn,
+    stride_kd,
+    stride_vh,
+    stride_vn,
+    stride_vd,
+    stride_oh,
+    stride_om,
+    stride_od,
+    is_causal: tl.constexpr,
+    groups: tl.constexpr,
+    BLOCK_SIZE_M: tl.constexpr,
+    BLOCK_SIZE_N: tl.constexpr,
+    BLOCK_SIZE_K: tl.constexpr,
+):
+    pid_qh = tl.program_id(0)  # BxH ，放到一个编号中
+    pid_kh = (pid_qh) // groups  # KV 的编号向下整除 组数，不用分离 B和H，自然和Q在同一个B中
+    pid = tl.program_id(1)
+    result_o = tl.zeros((BLOCK_SIZE_M, BLOCK_SIZE_K), dtype=tl.float32)
+    offsets_qm = (pid * BLOCK_SIZE_M + tl.arange(0, BLOCK_SIZE_M)) % M
+    offsets_qd = tl.arange(0, BLOCK_SIZE_K)
+
+    Q_ptr = Q + pid_qh * stride_qh
+    K_ptr = K + pid_kh * stride_kh
+    V_ptr = V + pid_kh * stride_vh
+    O_ptr = output + pid_qh * stride_oh
+
+    data_q = tl.load(
+        Q_ptr + offsets_qm[:, None] * stride_qm + offsets_qd[None, :] * stride_qd,
+        mask=(offsets_qd[None, :] < d) & (offsets_qm[:, None] < M),
+        other=0.0,
+    )
+
+    offsets_kk = tl.arange(0, BLOCK_SIZE_N)
+    data_k = tl.load(
+        K_ptr + offsets_kk[:, None] * stride_kn + offsets_qd[None, :] * stride_kd,
+        mask=(offsets_qd[None, :] < d) & (offsets_kk[:, None] < N),
+        other=0.0,
+    )
+    data_v = tl.load(
+        V_ptr + offsets_kk[:, None] * stride_vn + offsets_qd[None, :] * stride_vd,
+        mask=(offsets_qd[None, :] < d) & (offsets_kk[:, None] < N),
+        other=0.0,
+    )
+    attn = tl.dot(data_q, data_k.T) * scale
+    boundary_mask_q = (offsets_qm[:, None] < M) & (offsets_kk[None, :] < N)
+    if is_causal:
+      causual_mask = offsets_qm[:, None] >= offsets_kk[None, :]
+      attn = tl.where(boundary_mask_q & causual_mask, attn, -float("inf"))
+    else:
+      attn = tl.where(boundary_mask_q, attn, -float("inf"))
+    max_val = tl.max(attn, axis=-1, keep_dims=True)
+    attn = attn - max_val
+    exp_attn = tl.exp(attn)
+
+    dominator = tl.sum(exp_attn, axis=-1, keep_dims=True)
+    result_o = tl.dot(exp_attn, data_v)
+
+    for k in tl.range(BLOCK_SIZE_N, N, BLOCK_SIZE_N):
+        offsets_kk = k + tl.arange(0, BLOCK_SIZE_N)
+        data_k = tl.load(
+            K_ptr + offsets_kk[:, None] * stride_kn + offsets_qd[None, :] * stride_kd,
+            mask=(offsets_qd[None, :] < d) & (offsets_kk[:, None] < N),
+            other=0.0,
+        )
+        data_v = tl.load(
+            V_ptr + offsets_kk[:, None] * stride_vn + offsets_qd[None, :] * stride_vd,
+            mask=(offsets_qd[None, :] < d) & (offsets_kk[:, None] < N),
+            other=0.0,
+        )
+        attn = tl.dot(data_q, data_k.T) * scale
+        causual_mask = offsets_qm[:, None] >= offsets_kk[None, :]
+        if is_causal:
+          causual_mask = offsets_qm[:, None] >= offsets_kk[None, :]
+          attn = tl.where(boundary_mask_q & causual_mask, attn, -float("inf"))
+        else:
+          attn = tl.where(boundary_mask_q, attn, -float("inf"))
+        tmp_max = tl.max(attn, axis=-1, keep_dims=True)
+        new_max_val = tl.maximum(max_val, tmp_max)
+        attn = attn - new_max_val
+        exp_attn = tl.exp(attn)
+
+        scale_factor = tl.exp(max_val - new_max_val)
+        dominator = dominator * scale_factor + tl.sum(exp_attn, axis=-1, keep_dims=True)
+        max_val = new_max_val
+        result_o = result_o * scale_factor + tl.dot(exp_attn, data_v)
+    result_o /= dominator
+    offsets_om = pid * BLOCK_SIZE_M + tl.arange(0, BLOCK_SIZE_M)
+    offsets_od = tl.arange(0, BLOCK_SIZE_K)
+
+    tl.store(
+        O_ptr + offsets_om[:, None] * stride_om + offsets_od[None, :] * stride_od,
+        result_o,
+        mask=(offsets_od[None, :] < d) & (offsets_om[:, None] < M),
+    )
+
+# Q, K, V, output are tensors on the GPU
+
+
+def flash_attention(Q: torch.Tensor, K: torch.Tensor, V: torch.Tensor, is_causal:bool=True):
+    assert len(Q.shape) == 4
+    assert len(K.shape) == 4
+    assert len(V.shape) == 4
+    assert K.shape == V.shape
+    assert K.shape[-1] == Q.shape[-1]
+
+    B, Hq, M, D = Q.shape
+    _, Hk, N, _ = K.shape
+    assert Hq % Hk == 0
+    groups = Hq // Hk
+
+    output = torch.empty_like(Q)
+
+    scale = 1.0 / (D**0.5)
+    BLOCK_SIZE_M = 32
+    BLOCK_SIZE_N = 32
+    BLOCK_SIZE_K = triton.next_power_of_2(max(D, 16))
+    grid = (Hq * B, triton.cdiv(M, BLOCK_SIZE_M))
+    fused_attention[grid](
+        Q, K, V, output,
+        M, N, D,
+        scale,
+        Q.stride(1), Q.stride(2), Q.stride(3),
+        K.stride(1), K.stride(2), K.stride(3),
+        V.stride(1), V.stride(2), V.stride(3),
+        output.stride(1), output.stride(2), output.stride(3),
+        is_causal,
+        groups,
+        BLOCK_SIZE_M, BLOCK_SIZE_N, BLOCK_SIZE_K
+    )
+    return output
+
 def cpu_forward(q, k, v, head_dim, is_causal: bool = True):
     batch_size, head_q, seq_len_q, head_dim = q.shape
     head_kv = k.shape[1]
@@ -271,7 +416,8 @@ def main():
         [1, 1, 2, 4]
     )
     ref_o = cpu_forward(q, k, v, 4)
-    o = scaled_dot_production(q, k, v)
+    # o = scaled_dot_production(q, k, v)
+    o = flash_attention(q,k,v)
     print(ref_o)
     print(o)
 
