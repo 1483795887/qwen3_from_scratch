@@ -1,7 +1,9 @@
 import triton
 import triton.language as tl
 import torch
+import os
 
+_TRITON_IEEE_PRECISION = os.environ.get("TRITON_IEEE_PRECISION", "0") == "1"
 
 @triton.jit
 def matrix_multiplication_kernel(
@@ -25,6 +27,7 @@ def matrix_multiplication_kernel(
     BLOCK_SIZE_M: tl.constexpr,
     BLOCK_SIZE_N: tl.constexpr,
     BLOCK_SIZE_K: tl.constexpr,
+    USE_FP32_ACCUM: tl.constexpr,
 ):
     pid_h = tl.program_id(2)
     pid_m = tl.program_id(0)
@@ -51,7 +54,10 @@ def matrix_multiplication_kernel(
     for k in tl.range(0, K, BLOCK_SIZE_K):
         block_a = tl.load(a_ptrs, (offsets_k[None, :] < K - k) & mask_m, 0.0)
         block_b = tl.load(b_ptrs, (offsets_k[:, None] < K - k) & mask_n, 0.0)
-        acc = tl.dot(block_a, block_b, acc, input_precision="ieee")
+        if USE_FP32_ACCUM:
+            acc = tl.dot(block_a, block_b, acc, input_precision="ieee")
+        else:
+            acc = tl.dot(block_a, block_b, acc)
         a_ptrs += BLOCK_SIZE_K * stride_ak
         b_ptrs += BLOCK_SIZE_K * stride_bk
     tl.store(
@@ -86,6 +92,7 @@ def matrix_multiplication_kernel_with_transpose(
     BLOCK_SIZE_M: tl.constexpr,
     BLOCK_SIZE_N: tl.constexpr,
     BLOCK_SIZE_K: tl.constexpr,
+    USE_FP32_ACCUM: tl.constexpr,
 ):
     pid_m = tl.program_id(0)
     pid_n = tl.program_id(1)
@@ -108,7 +115,10 @@ def matrix_multiplication_kernel_with_transpose(
     for k in tl.range(0, K, BLOCK_SIZE_K):
         block_a = tl.load(a_ptrs, (offsets_k[None, :] < K - k) & mask_m, 0.0)
         block_b = tl.load(b_ptrs, (offsets_k[None, :] < K - k) & mask_n, 0.0)
-        acc = tl.dot(block_a, block_b.T, acc, input_precision="ieee")
+        if USE_FP32_ACCUM:
+            acc = tl.dot(block_a, block_b.T, acc, input_precision="ieee")
+        else:
+            acc = tl.dot(block_a, block_b.T, acc)
         a_ptrs += BLOCK_SIZE_K * stride_ak
         b_ptrs += BLOCK_SIZE_K * stride_bk
     tl.store(
@@ -182,6 +192,7 @@ def scaled_dot_production(
         BLOCK_SIZE_M,
         BLOCK_SIZE_N,
         BLOCK_SIZE_D,
+        _TRITON_IEEE_PRECISION,
     )
 
     BLOCK_SIZE = triton.next_power_of_2(N)
@@ -214,6 +225,7 @@ def scaled_dot_production(
         BLOCK_SIZE_M,
         BLOCK_SIZE_N,
         BLOCK_SIZE_D,
+        _TRITON_IEEE_PRECISION,
     )
     return output
 
@@ -245,6 +257,7 @@ def fused_attention(
     BLOCK_SIZE_M: tl.constexpr,
     BLOCK_SIZE_N: tl.constexpr,
     BLOCK_SIZE_K: tl.constexpr,
+    USE_FP32_ACCUM: tl.constexpr,
 ):
     pid_qh = tl.program_id(0)  # BxH ，放到一个编号中
     pid_kh = (pid_qh) // groups  # KV 的编号向下整除 组数，不用分离 B和H，自然和Q在同一个B中
@@ -275,7 +288,10 @@ def fused_attention(
         mask=(offsets_qd[None, :] < d) & (offsets_kk[:, None] < N),
         other=0.0,
     )
-    attn = tl.dot(data_q, data_k.T) * scale
+    if USE_FP32_ACCUM:
+        attn = tl.dot(data_q, data_k.T, input_precision="ieee") * scale
+    else:
+        attn = tl.dot(data_q, data_k.T) * scale
     boundary_mask_q = (offsets_qm[:, None] < M) & (offsets_kk[None, :] < N)
     if is_causal:
       causual_mask = offsets_qm[:, None] >= offsets_kk[None, :]
@@ -287,7 +303,10 @@ def fused_attention(
     exp_attn = tl.exp(attn)
 
     dominator = tl.sum(exp_attn, axis=-1, keep_dims=True)
-    result_o = tl.dot(exp_attn, data_v)
+    if USE_FP32_ACCUM:
+        result_o = tl.dot(exp_attn, data_v, input_precision="ieee")
+    else:
+        result_o = tl.dot(exp_attn, data_v)
 
     for k in tl.range(BLOCK_SIZE_N, N, BLOCK_SIZE_N):
         offsets_kk = k + tl.arange(0, BLOCK_SIZE_N)
@@ -301,7 +320,10 @@ def fused_attention(
             mask=(offsets_qd[None, :] < d) & (offsets_kk[:, None] < N),
             other=0.0,
         )
-        attn = tl.dot(data_q, data_k.T) * scale
+        if USE_FP32_ACCUM:
+            attn = tl.dot(data_q, data_k.T, input_precision="ieee") * scale
+        else:
+            attn = tl.dot(data_q, data_k.T) * scale
         causual_mask = offsets_qm[:, None] >= offsets_kk[None, :]
         if is_causal:
           causual_mask = offsets_qm[:, None] >= offsets_kk[None, :]
@@ -316,7 +338,10 @@ def fused_attention(
         scale_factor = tl.exp(max_val - new_max_val)
         dominator = dominator * scale_factor + tl.sum(exp_attn, axis=-1, keep_dims=True)
         max_val = new_max_val
-        result_o = result_o * scale_factor + tl.dot(exp_attn, data_v)
+        if USE_FP32_ACCUM:
+            result_o = result_o * scale_factor + tl.dot(exp_attn, data_v, input_precision="ieee")
+        else:
+            result_o = result_o * scale_factor + tl.dot(exp_attn, data_v)
     result_o /= dominator
     offsets_om = pid * BLOCK_SIZE_M + tl.arange(0, BLOCK_SIZE_M)
     offsets_od = tl.arange(0, BLOCK_SIZE_K)
@@ -359,7 +384,8 @@ def flash_attention(Q: torch.Tensor, K: torch.Tensor, V: torch.Tensor, is_causal
         output.stride(1), output.stride(2), output.stride(3),
         is_causal,
         groups,
-        BLOCK_SIZE_M, BLOCK_SIZE_N, BLOCK_SIZE_K
+        BLOCK_SIZE_M, BLOCK_SIZE_N, BLOCK_SIZE_K,
+        _TRITON_IEEE_PRECISION,
     )
     return output
 
