@@ -127,11 +127,23 @@ class MyAttn(nn.Module):
         self.n_head_dim = config.head_dim
 
     def forward(self, q, k, v):
+        if q.shape[2] == 1:
+            return self.decode(q, k, v)
         if q.is_cuda:
             from qwen3_from_scratch.kernels.triton.attn import scaled_dot_production
             return scaled_dot_production(q, k, v, is_causal=True)
         return self.cpu_forward(q, k, v, is_causal=True)
         
+    def decode(self, q, k, v):
+        return scaled_dot_product_attention(
+                q,
+                k,
+                v,
+                is_causal=False,
+                enable_gqa=True,
+                scale=self.n_head_dim ** -0.5,
+            )
+
     def cpu_forward(self, q, k, v, is_causal: bool = True):
         batch_size, head_q, seq_len_q, head_dim = q.shape
         head_kv = k.shape[1]
@@ -176,6 +188,8 @@ class MyAttn(nn.Module):
 @ComponentFactory.register("attn", "my_op_flash")
 class MyAttnFlash(MyAttn):
     def forward(self, q, k, v):
+        if q.shape[2] == 1:
+            return self.decode(q, k, v)
         if q.is_cuda:
             from qwen3_from_scratch.kernels.triton.attn import flash_attention
             return flash_attention(q,k,v,is_causal=True)
