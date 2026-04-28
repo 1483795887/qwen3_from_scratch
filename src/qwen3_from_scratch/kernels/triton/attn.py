@@ -265,11 +265,11 @@ def fused_attention(
     USE_FP32_ACCUM: tl.constexpr,
     dtype: tl.constexpr,
 ):
-    pid_qh = tl.program_id(0)
-    pid_kh = (pid_qh) // groups
+    pid_qh = tl.program_id(0)  # BxH ，放到一个编号中
+    pid_kh = (pid_qh) // groups  # KV 的编号向下整除 组数，不用分离 B和H，自然和Q在同一个B中
     pid = tl.program_id(1)
     result_o = tl.zeros((BLOCK_SIZE_M, BLOCK_SIZE_K), dtype=tl.float32)
-    offsets_qm = (pid * BLOCK_SIZE_M + tl.arange(0, BLOCK_SIZE_M)) % M
+    offsets_qm = pid * BLOCK_SIZE_M + tl.arange(0, BLOCK_SIZE_M)
     offsets_qd = tl.arange(0, BLOCK_SIZE_K)
 
     Q_ptr = Q + pid_qh * stride_qh
@@ -277,62 +277,42 @@ def fused_attention(
     V_ptr = V + pid_kh * stride_vh
     O_ptr = output + pid_qh * stride_oh
 
+    mask_m = offsets_qm[:, None] < M
+    mask_d = offsets_qd < d
+
     data_q = tl.load(
         Q_ptr + offsets_qm[:, None] * stride_qm + offsets_qd[None, :] * stride_qd,
-        mask=(offsets_qd[None, :] < d) & (offsets_qm[:, None] < M),
+        mask=mask_m & mask_d,
         other=0.0,
-    ).to(tl.float32)
+    ).to(dtype)
 
-    offsets_kk = tl.arange(0, BLOCK_SIZE_N)
-    data_k = tl.load(
-        K_ptr + offsets_kk[:, None] * stride_kn + offsets_qd[None, :] * stride_kd,
-        mask=(offsets_qd[None, :] < d) & (offsets_kk[:, None] < N),
-        other=0.0,
-    ).to(tl.float32)
-    data_v = tl.load(
-        V_ptr + offsets_kk[:, None] * stride_vn + offsets_qd[None, :] * stride_vd,
-        mask=(offsets_qd[None, :] < d) & (offsets_kk[:, None] < N),
-        other=0.0,
-    ).to(tl.float32)
-    if USE_FP32_ACCUM:
-        attn = tl.dot(data_q, data_k.T, input_precision="ieee") * scale
-    else:
-        attn = tl.dot(data_q, data_k.T) * scale
-    attn = tl.where((offsets_qm[:, None] < M) & (offsets_kk[None, :] < N), attn, -float("inf"))
-    if is_causal:
-        attn = tl.where(offsets_qm[:, None] >= offsets_kk[None, :], attn, -float("inf"))
-    max_val = tl.max(attn, axis=-1, keep_dims=True)
-    attn = attn - max_val
-    exp_attn = tl.exp(attn)
-    dominator = tl.sum(exp_attn, axis=-1, keep_dims=True)
-    if USE_FP32_ACCUM:
-        result_o = tl.dot(exp_attn, data_v, input_precision="ieee")
-    else:
-        result_o = tl.dot(exp_attn, data_v)
-
-    for k in tl.range(BLOCK_SIZE_N, N, BLOCK_SIZE_N):
+    max_val = tl.zeros((BLOCK_SIZE_M, 1), dtype=dtype) - float("inf")
+    dominator = tl.zeros((BLOCK_SIZE_M, 1), dtype=dtype)
+    for k in tl.range(0, N, BLOCK_SIZE_N):
         offsets_kk = k + tl.arange(0, BLOCK_SIZE_N)
+        kv_mask = mask_d & (offsets_kk[:, None] < N)
         data_k = tl.load(
             K_ptr + offsets_kk[:, None] * stride_kn + offsets_qd[None, :] * stride_kd,
-            mask=(offsets_qd[None, :] < d) & (offsets_kk[:, None] < N),
+            mask=kv_mask,
             other=0.0,
-        ).to(tl.float32)
+        ).to(dtype)
         data_v = tl.load(
             V_ptr + offsets_kk[:, None] * stride_vn + offsets_qd[None, :] * stride_vd,
-            mask=(offsets_qd[None, :] < d) & (offsets_kk[:, None] < N),
+            mask=kv_mask,
             other=0.0,
-        ).to(tl.float32)
+        ).to(dtype) 
         if USE_FP32_ACCUM:
             attn = tl.dot(data_q, data_k.T, input_precision="ieee") * scale
         else:
             attn = tl.dot(data_q, data_k.T) * scale
-        attn = tl.where((offsets_qm[:, None] < M) & (offsets_kk[None, :] < N), attn, -float("inf"))
+        attn = tl.where(mask_m & (offsets_kk[None, :] < N), attn, -float("inf"))
         if is_causal:
             attn = tl.where(offsets_qm[:, None] >= offsets_kk[None, :], attn, -float("inf"))
         tmp_max = tl.max(attn, axis=-1, keep_dims=True)
         new_max_val = tl.maximum(max_val, tmp_max)
         attn = attn - new_max_val
         exp_attn = tl.exp(attn)
+
         scale_factor = tl.exp(max_val - new_max_val)
         dominator = dominator * scale_factor + tl.sum(exp_attn, axis=-1, keep_dims=True)
         max_val = new_max_val
@@ -341,14 +321,13 @@ def fused_attention(
         else:
             result_o = result_o * scale_factor + tl.dot(exp_attn, data_v)
     result_o = (result_o / dominator).to(dtype)
-    offsets_om = pid * BLOCK_SIZE_M + tl.arange(0, BLOCK_SIZE_M)
-    offsets_od = tl.arange(0, BLOCK_SIZE_K)
 
     tl.store(
-        O_ptr + offsets_om[:, None] * stride_om + offsets_od[None, :] * stride_od,
-        result_o,
-        mask=(offsets_od[None, :] < d) & (offsets_om[:, None] < M),
+        O_ptr + offsets_qm[:, None] * stride_om + offsets_qd[None, :] * stride_od,
+        result_o.to(dtype),
+        mask=mask_d & mask_m,
     )
+
 
 # Q, K, V, output are tensors on the GPU
 
