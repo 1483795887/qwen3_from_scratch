@@ -93,8 +93,8 @@ def rms_norm_forward_kernel_one_step(
 
 
 def rms_norm_forward(x: torch.Tensor, gamma: torch.Tensor, eps: float = 1e-5):
-    assert x.is_contiguous()
-    assert gamma.is_contiguous()
+    assert x.stride(-1) == 1
+    assert gamma.stride(-1) == 1
     shape = x.shape
     D = shape[-1]
     assert D == gamma.shape[-1]
