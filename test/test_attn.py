@@ -11,7 +11,7 @@ from qwen3_from_scratch.models.attn import (
 )
 
 
-@pytest.mark.parametrize("component_type", ["base", "py_flash_attn"])
+@pytest.mark.parametrize("component_type", ["base", "py_flash_attn", "my_op", "my_op_flash"])
 def test_gqa_attn_shape_correct(model_config, component_type, device):
     n_batch = 2
     n_seq = 256
@@ -37,7 +37,7 @@ class FakeModule(torch.nn.Module):
         self.num_key_value_groups = n_kv_groups
 
 
-@pytest.mark.parametrize("component_type", ["base", "py_flash_attn"])
+@pytest.mark.parametrize("component_type", ["base", "py_flash_attn", "my_op", "my_op_flash"])
 def test_gqa_against_transformers(
     model_config, qwen3_config, component_type, device
 ):
