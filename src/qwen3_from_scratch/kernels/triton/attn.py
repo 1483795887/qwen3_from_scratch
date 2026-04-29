@@ -311,11 +311,11 @@ def fused_attention(
         tmp_max = tl.max(attn, axis=-1, keep_dims=True)
         new_max_val = tl.maximum(max_val, tmp_max)
         attn = attn - new_max_val
-        exp_attn = tl.exp(attn)
+        exp_attn = tl.exp(attn).to(dtype)
 
-        scale_factor = tl.exp(max_val - new_max_val)
+        scale_factor = tl.exp(max_val - new_max_val).to(dtype)
         dominator = dominator * scale_factor + tl.sum(exp_attn, axis=-1, keep_dims=True)
-        max_val = new_max_val
+        max_val = new_max_val.to(dtype)
         if USE_FP32_ACCUM:
             result_o = result_o * scale_factor + tl.dot(exp_attn, data_v, input_precision="ieee")
         else:
