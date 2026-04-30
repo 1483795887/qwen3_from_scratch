@@ -68,3 +68,23 @@ class PythonRope(nn.Module):
             return (x * emb_cos) + (self._rotate_normal(x) * emb_sin)
         else:
             raise ValueError(f"Unknown RoPE type: {self.rope_type}")
+
+@ComponentFactory.register("rope", "my_op")
+class MyRope(PythonRope):
+  def forward(self, x: torch.Tensor, context: ModelContext):
+    if self.rope_type == "normal" or not x.is_cuda:
+      return super().forward(x, context)
+    seq_len = x.shape[2]
+
+    if context.position_ids is None:
+        context.position_ids = torch.arange(
+            seq_len, device=x.device
+        ).unsqueeze(0)
+    if context.position_embeddings is None:
+        context.position_embeddings = self.build_cos_sin_embed(
+            x, context.position_ids
+        )
+    emb_cos = context.position_embeddings.cos_embed[None, :, :]
+    emb_sin = context.position_embeddings.sin_embed[None, :, :]
+    from qwen3_from_scratch.kernels.triton.rope import neox_rope
+    return neox_rope(x, emb_cos, emb_sin)
