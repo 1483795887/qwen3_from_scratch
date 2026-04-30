@@ -11,7 +11,7 @@ from qwen3_from_scratch.factory import ComponentFactory
 from qwen3_from_scratch.inference.context import ModelContext
 
 
-@pytest.mark.parametrize("component_type", ["base"])
+@pytest.mark.parametrize("component_type", ["base", "my_op"])
 def test_rope(model_config, component_type, device):
     shape = (2, 16, 1024, 128)
     context = ModelContext()
@@ -27,7 +27,7 @@ def test_rope(model_config, component_type, device):
             assert x.shape == shape
 
 
-@pytest.mark.parametrize("component_type", ["base"])
+@pytest.mark.parametrize("component_type", ["base", "my_op"])
 def test_rope_with_position_inputs(model_config, component_type, device):
     shape = (2, 16, 1024, 128)
     context = ModelContext()
@@ -44,7 +44,7 @@ def test_rope_with_position_inputs(model_config, component_type, device):
             assert x.shape == shape
 
 
-@pytest.mark.parametrize("component_type", ["base"])
+@pytest.mark.parametrize("component_type", ["base", "my_op"])
 def test_rope_against_transformers(
     model_config, qwen3_config, component_type, device
 ):
