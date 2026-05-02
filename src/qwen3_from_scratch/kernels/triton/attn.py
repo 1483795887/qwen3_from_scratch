@@ -2,6 +2,7 @@ import triton
 import triton.language as tl
 import torch
 import os
+import triton.compiler as tc
 
 _TRITON_IEEE_PRECISION = os.environ.get("TRITON_IEEE_PRECISION", "0") == "1"
 
@@ -280,11 +281,11 @@ def fused_attention(
     mask_m = offsets_qm[:, None] < M
     mask_d = offsets_qd < d
 
-    data_q = tl.load(
+    data_q = (tl.load(
         Q_ptr + offsets_qm[:, None] * stride_qm + offsets_qd[None, :] * stride_qd,
         mask=mask_m & mask_d,
-        other=0.0,
-    ).to(dtype)
+        other=0.0,cache_modifier='.cv'
+    )*scale).to(dtype)
 
     max_val = tl.zeros((BLOCK_SIZE_M, 1), dtype=dtype) - float("inf")
     dominator = tl.zeros((BLOCK_SIZE_M, 1), dtype=dtype)
@@ -302,9 +303,9 @@ def fused_attention(
             other=0.0,
         ).to(dtype) 
         if USE_FP32_ACCUM:
-            attn = tl.dot(data_q, data_k.T, input_precision="ieee") * scale
+            attn = tl.dot(data_q, data_k.T, input_precision="ieee") 
         else:
-            attn = tl.dot(data_q, data_k.T) * scale
+            attn = tl.dot(data_q, data_k.T)
         attn = tl.where(mask_m & (offsets_kk[None, :] < N), attn, -float("inf"))
         if is_causal:
             attn = tl.where(offsets_qm[:, None] >= offsets_kk[None, :], attn, -float("inf"))
@@ -324,7 +325,7 @@ def fused_attention(
 
     tl.store(
         O_ptr + offsets_qm[:, None] * stride_om + offsets_qd[None, :] * stride_od,
-        result_o.to(dtype),
+        result_o,
         mask=mask_d & mask_m,
     )
 
@@ -347,8 +348,8 @@ def flash_attention(Q: torch.Tensor, K: torch.Tensor, V: torch.Tensor, is_causal
     output = torch.empty_like(Q)
 
     scale = 1.0 / (D**0.5)
-    BLOCK_SIZE_M = 32
-    BLOCK_SIZE_N = 32
+    BLOCK_SIZE_M = 64
+    BLOCK_SIZE_N = 64
     BLOCK_SIZE_K = triton.next_power_of_2(max(D, 16))
     grid = (Hq * B, triton.cdiv(M, BLOCK_SIZE_M))
     dtype = tl.float32 if Q.dtype == torch.float32 else (tl.float16 if Q.dtype == torch.float16 else tl.bfloat16)
@@ -365,6 +366,7 @@ def flash_attention(Q: torch.Tensor, K: torch.Tensor, V: torch.Tensor, is_causal
         BLOCK_SIZE_M, BLOCK_SIZE_N, BLOCK_SIZE_K,
         _TRITON_IEEE_PRECISION,
         dtype,
+        num_stages=1
     )
     return output
 
@@ -411,20 +413,21 @@ def cpu_forward(q, k, v, head_dim, is_causal: bool = True):
 
 
 def main():
-    for dtype in [torch.float32, torch.float16, torch.bfloat16]:
-        q = torch.arange(0, 12, dtype=dtype, device="cuda").view([1, 1, 3, 4])
-        k = torch.arange(12, 20, dtype=dtype, device="cuda").view([1, 1, 2, 4])
-        v = torch.arange(20, 28, dtype=dtype, device="cuda").view([1, 1, 2, 4])
-        ref_o = cpu_forward(q, k, v, 4)
-        o = flash_attention(q, k, v)
-        print(f"dtype={dtype}, ref_o={ref_o}, o={o}")
-    for dtype in [torch.float32, torch.float16, torch.bfloat16]:
-        q = torch.arange(0, 12, dtype=dtype, device="cuda").view([1, 1, 3, 4])
-        k = torch.arange(12, 20, dtype=dtype, device="cuda").view([1, 1, 2, 4])
-        v = torch.arange(20, 28, dtype=dtype, device="cuda").view([1, 1, 2, 4])
-        ref_o = cpu_forward(q, k, v, 4)
-        o = scaled_dot_production(q, k, v)
-        print(f"scaled_dot_production dtype={dtype}, ref_o={ref_o}, o={o}")
+    print(fused_attention.compile().ptx())
+    # for dtype in [torch.float32, torch.float16, torch.bfloat16]:
+    #     q = torch.arange(0, 12, dtype=dtype, device="cuda").view([1, 1, 3, 4])
+    #     k = torch.arange(12, 20, dtype=dtype, device="cuda").view([1, 1, 2, 4])
+    #     v = torch.arange(20, 28, dtype=dtype, device="cuda").view([1, 1, 2, 4])
+    #     ref_o = cpu_forward(q, k, v, 4)
+    #     o = flash_attention(q, k, v)
+    #     print(f"dtype={dtype}, ref_o={ref_o}, o={o}")
+    # for dtype in [torch.float32, torch.float16, torch.bfloat16]:
+    #     q = torch.arange(0, 12, dtype=dtype, device="cuda").view([1, 1, 3, 4])
+    #     k = torch.arange(12, 20, dtype=dtype, device="cuda").view([1, 1, 2, 4])
+    #     v = torch.arange(20, 28, dtype=dtype, device="cuda").view([1, 1, 2, 4])
+    #     ref_o = cpu_forward(q, k, v, 4)
+    #     o = scaled_dot_production(q, k, v)
+    #     print(f"scaled_dot_production dtype={dtype}, ref_o={ref_o}, o={o}")
 
 
 if __name__ == "__main__":
