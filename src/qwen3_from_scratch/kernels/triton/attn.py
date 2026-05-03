@@ -267,9 +267,9 @@ def fused_attention(
     USE_FP32_ACCUM: tl.constexpr,
     dtype: tl.constexpr,
 ):
-    pid_qh = tl.program_id(0)  # BxH ，放到一个编号中
+    pid_qh = tl.program_id(1)  # BxH ，放到一个编号中
     pid_kh = (pid_qh) // groups  # KV 的编号向下整除 组数，不用分离 B和H，自然和Q在同一个B中
-    pid = tl.program_id(1)
+    pid = tl.program_id(0)
     result_o = tl.zeros((BLOCK_SIZE_M, BLOCK_SIZE_K), dtype=tl.float32)
     offsets_qm = pid * BLOCK_SIZE_M + tl.arange(0, BLOCK_SIZE_M)
     offsets_qd = tl.arange(0, BLOCK_SIZE_K)
@@ -290,19 +290,24 @@ def fused_attention(
 
     max_val = tl.zeros((BLOCK_SIZE_M, 1), dtype=tl.float32) - float("inf")
     dominator = tl.zeros((BLOCK_SIZE_M, 1), dtype=tl.float32)
-    for k in tl.range(0, N, BLOCK_SIZE_N):
-        offsets_kk = k + tl.arange(0, BLOCK_SIZE_N)
+    if is_causal:
+        hi =  min(N, (pid + 1) * BLOCK_SIZE_M)
+    else:
+        hi = N
+    for k in tl.range(0, hi, BLOCK_SIZE_N, warp_specialize=True):
+        start_n = tl.multiple_of(k, BLOCK_SIZE_N)
+        offsets_kk = start_n + tl.arange(0, BLOCK_SIZE_N)
         kv_mask = mask_d & (offsets_kk[:, None] < N)
         data_k = tl.load(
             K_ptr + offsets_kk[:, None] * stride_kn + offsets_qd[None, :] * stride_kd,
             mask=kv_mask,
             other=0.0,
-        ).to(dtype)
+        )
         data_v = tl.load(
             V_ptr + offsets_kk[:, None] * stride_vn + offsets_qd[None, :] * stride_vd,
             mask=kv_mask,
             other=0.0,
-        ).to(dtype) 
+        )
         if USE_FP32_ACCUM:
             attn = tl.dot(data_q, data_k.T, input_precision="ieee")
         else:
@@ -353,7 +358,7 @@ def flash_attention(Q: torch.Tensor, K: torch.Tensor, V: torch.Tensor, is_causal
     BLOCK_SIZE_M = 64
     BLOCK_SIZE_N = 64
     BLOCK_SIZE_K = triton.next_power_of_2(max(D, 16))
-    grid = (Hq * B, triton.cdiv(M, BLOCK_SIZE_M))
+    grid = (triton.cdiv(M, BLOCK_SIZE_M), Hq * B)
     dtype = tl.float32 if Q.dtype == torch.float32 else (tl.float16 if Q.dtype == torch.float16 else tl.bfloat16)
     fused_attention[grid](
         Q, K, V, output,
@@ -368,7 +373,7 @@ def flash_attention(Q: torch.Tensor, K: torch.Tensor, V: torch.Tensor, is_causal
         BLOCK_SIZE_M, BLOCK_SIZE_N, BLOCK_SIZE_K,
         _TRITON_IEEE_PRECISION,
         dtype,
-        num_stages=1
+        num_stages=4
     )
     return output
 
