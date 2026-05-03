@@ -1,3 +1,4 @@
+import math
 import triton
 import triton.language as tl
 import torch
@@ -147,7 +148,7 @@ def softmax(
         row = tl.load(input_ptr, mask=mask & ((not is_causal) | (col_offsets <= row_idx)), other=-float("inf"))
         max_val = tl.max(row)
         row = row - max_val
-        row = tl.exp(row)
+        row = tl.math.exp2(row)
         sum_val = tl.sum(row)
         row = row / sum_val
         tl.store(input_ptr, row, mask=mask)
@@ -284,11 +285,11 @@ def fused_attention(
     data_q = (tl.load(
         Q_ptr + offsets_qm[:, None] * stride_qm + offsets_qd[None, :] * stride_qd,
         mask=mask_m & mask_d,
-        other=0.0,cache_modifier='.cv'
+        other=0.0
     )*scale).to(dtype)
 
-    max_val = tl.zeros((BLOCK_SIZE_M, 1), dtype=dtype) - float("inf")
-    dominator = tl.zeros((BLOCK_SIZE_M, 1), dtype=dtype)
+    max_val = tl.zeros((BLOCK_SIZE_M, 1), dtype=tl.float32) - float("inf")
+    dominator = tl.zeros((BLOCK_SIZE_M, 1), dtype=tl.float32)
     for k in tl.range(0, N, BLOCK_SIZE_N):
         offsets_kk = k + tl.arange(0, BLOCK_SIZE_N)
         kv_mask = mask_d & (offsets_kk[:, None] < N)
@@ -303,25 +304,26 @@ def fused_attention(
             other=0.0,
         ).to(dtype) 
         if USE_FP32_ACCUM:
-            attn = tl.dot(data_q, data_k.T, input_precision="ieee") 
+            attn = tl.dot(data_q, data_k.T, input_precision="ieee")
         else:
             attn = tl.dot(data_q, data_k.T)
-        attn = tl.where(mask_m & (offsets_kk[None, :] < N), attn, -float("inf"))
         if is_causal:
-            attn = tl.where(offsets_qm[:, None] >= offsets_kk[None, :], attn, -float("inf"))
+            causal_mask = offsets_qm[:, None] >= offsets_kk[None, :]
+            attn = attn + tl.where(causal_mask, 0, -float("inf"))
         tmp_max = tl.max(attn, axis=-1, keep_dims=True)
         new_max_val = tl.maximum(max_val, tmp_max)
         attn = attn - new_max_val
-        exp_attn = tl.exp(attn).to(dtype)
+        exp_attn = tl.math.exp2(attn)
 
-        scale_factor = tl.exp(max_val - new_max_val).to(dtype)
+        scale_factor = tl.math.exp2(max_val - new_max_val)
         dominator = dominator * scale_factor + tl.sum(exp_attn, axis=-1, keep_dims=True)
-        max_val = new_max_val.to(dtype)
+        max_val = new_max_val
+        result_o *= scale_factor
         if USE_FP32_ACCUM:
-            result_o = result_o * scale_factor + tl.dot(exp_attn, data_v, input_precision="ieee")
+            result_o = tl.dot(exp_attn.to(dtype), data_v, input_precision="ieee", acc=result_o)
         else:
-            result_o = result_o * scale_factor + tl.dot(exp_attn, data_v)
-    result_o = (result_o / dominator).to(dtype)
+            result_o = tl.dot(exp_attn.to(dtype), data_v, acc=result_o)
+    result_o = result_o / dominator
 
     tl.store(
         O_ptr + offsets_qm[:, None] * stride_om + offsets_qd[None, :] * stride_od,
@@ -347,7 +349,7 @@ def flash_attention(Q: torch.Tensor, K: torch.Tensor, V: torch.Tensor, is_causal
 
     output = torch.empty_like(Q)
 
-    scale = 1.0 / (D**0.5)
+    scale = 1.0 / (D**0.5) * math.log2(math.e)
     BLOCK_SIZE_M = 64
     BLOCK_SIZE_N = 64
     BLOCK_SIZE_K = triton.next_power_of_2(max(D, 16))
@@ -413,14 +415,13 @@ def cpu_forward(q, k, v, head_dim, is_causal: bool = True):
 
 
 def main():
-    print(fused_attention.compile().ptx())
-    # for dtype in [torch.float32, torch.float16, torch.bfloat16]:
-    #     q = torch.arange(0, 12, dtype=dtype, device="cuda").view([1, 1, 3, 4])
-    #     k = torch.arange(12, 20, dtype=dtype, device="cuda").view([1, 1, 2, 4])
-    #     v = torch.arange(20, 28, dtype=dtype, device="cuda").view([1, 1, 2, 4])
-    #     ref_o = cpu_forward(q, k, v, 4)
-    #     o = flash_attention(q, k, v)
-    #     print(f"dtype={dtype}, ref_o={ref_o}, o={o}")
+    for dtype in [torch.float32, torch.float16, torch.bfloat16]:
+        q = torch.arange(0, 12, dtype=dtype, device="cuda").view([1, 1, 3, 4])
+        k = torch.arange(12, 20, dtype=dtype, device="cuda").view([1, 1, 2, 4])
+        v = torch.arange(20, 28, dtype=dtype, device="cuda").view([1, 1, 2, 4])
+        ref_o = cpu_forward(q, k, v, 4)
+        o = flash_attention(q, k, v)
+        print(f"dtype={dtype}, ref_o={ref_o}, o={o}")
     # for dtype in [torch.float32, torch.float16, torch.bfloat16]:
     #     q = torch.arange(0, 12, dtype=dtype, device="cuda").view([1, 1, 3, 4])
     #     k = torch.arange(12, 20, dtype=dtype, device="cuda").view([1, 1, 2, 4])
