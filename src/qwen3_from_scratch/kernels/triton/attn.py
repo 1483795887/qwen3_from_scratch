@@ -245,20 +245,12 @@ def fused_attention(
     output,
     M,
     N,
-    d,
+    HEAD_DIM: tl.constexpr,
     scale,
     stride_qh,
-    stride_qm,
-    stride_qd,
     stride_kh,
-    stride_kn,
-    stride_kd,
     stride_vh,
-    stride_vn,
-    stride_vd,
     stride_oh,
-    stride_om,
-    stride_od,
     is_causal: tl.constexpr,
     groups: tl.constexpr,
     BLOCK_SIZE_M: tl.constexpr,
@@ -280,10 +272,10 @@ def fused_attention(
     O_ptr = output + pid_qh * stride_oh
 
     mask_m = offsets_qm[:, None] < M
-    mask_d = offsets_qd < d
+    mask_d = offsets_qd < HEAD_DIM
 
     data_q = (tl.load(
-        Q_ptr + offsets_qm[:, None] * stride_qm + offsets_qd[None, :] * stride_qd,
+        Q_ptr + offsets_qm[:, None] * HEAD_DIM + offsets_qd[None, :],
         mask=mask_m & mask_d,
         other=0.0
     )*scale).to(dtype)
@@ -299,12 +291,12 @@ def fused_attention(
         offsets_kk = start_n + tl.arange(0, BLOCK_SIZE_N)
         kv_mask = mask_d & (offsets_kk[:, None] < N)
         data_k = tl.load(
-            K_ptr + offsets_kk[:, None] * stride_kn + offsets_qd[None, :] * stride_kd,
+            K_ptr + offsets_kk[:, None] * HEAD_DIM + offsets_qd[None, :],
             mask=kv_mask,
             other=0.0,
         )
         data_v = tl.load(
-            V_ptr + offsets_kk[:, None] * stride_vn + offsets_qd[None, :] * stride_vd,
+            V_ptr + offsets_kk[:, None] * HEAD_DIM + offsets_qd[None, :],
             mask=kv_mask,
             other=0.0,
         )
@@ -315,13 +307,12 @@ def fused_attention(
         if is_causal:
             causal_mask = offsets_qm[:, None] >= offsets_kk[None, :]
             attn = attn + tl.where(causal_mask, 0, -float("inf"))
-        tmp_max = tl.max(attn, axis=-1, keep_dims=True)
-        new_max_val = tl.maximum(max_val, tmp_max)
-        attn = attn - new_max_val
-        exp_attn = tl.math.exp2(attn)
+        new_max_val = tl.maximum(max_val, tl.max(attn, axis=-1, keep_dims=True))
+        exp_attn = tl.math.exp2(attn - new_max_val)
 
         scale_factor = tl.math.exp2(max_val - new_max_val)
-        dominator = dominator * scale_factor + tl.sum(exp_attn, axis=-1, keep_dims=True)
+        curr_dominator = tl.sum(exp_attn, axis=-1, keep_dims=True)
+        dominator = dominator * scale_factor + curr_dominator
         max_val = new_max_val
         result_o *= scale_factor
         if USE_FP32_ACCUM:
@@ -331,7 +322,7 @@ def fused_attention(
     result_o = result_o / dominator
 
     tl.store(
-        O_ptr + offsets_qm[:, None] * stride_om + offsets_qd[None, :] * stride_od,
+        O_ptr + offsets_qm[:, None] * HEAD_DIM + offsets_qd[None, :],
         result_o,
         mask=mask_d & mask_m,
     )
@@ -364,16 +355,16 @@ def flash_attention(Q: torch.Tensor, K: torch.Tensor, V: torch.Tensor, is_causal
         Q, K, V, output,
         M, N, D,
         scale,
-        Q.stride(1), Q.stride(2), Q.stride(3),
-        K.stride(1), K.stride(2), K.stride(3),
-        V.stride(1), V.stride(2), V.stride(3),
-        output.stride(1), output.stride(2), output.stride(3),
+        Q.stride(1),
+        K.stride(1),
+        V.stride(1),
+        output.stride(1),
         is_causal,
         groups,
         BLOCK_SIZE_M, BLOCK_SIZE_N, BLOCK_SIZE_K,
         _TRITON_IEEE_PRECISION,
         dtype,
-        num_stages=4
+        num_stages=4,
     )
     return output
 
