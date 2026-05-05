@@ -240,12 +240,10 @@ def fused_attention_intr(
     data_q,
     K_ptr, V_ptr,
     result_o, max_val, dominator,
-    M, N,
+    M, N, d: tl.constexpr,
     start_m,
     scale,
-    stride_kn, stride_kd,
-    stride_vn, stride_vd,
-    mask_d, mask_m,
+    mask_d,
     offsets_d, offsets_n,
     offsets_m,
     STAGE: tl.constexpr,
@@ -264,12 +262,12 @@ def fused_attention_intr(
         k = tl.multiple_of(k, BLOCK_SIZE_N)
         kv_mask = mask_d & (offsets_n[:, None] < N)
         data_k = tl.load(
-            K_ptr + offsets_n[:, None] * stride_kn + offsets_d[None, :] * stride_kd,
+            K_ptr + offsets_n[:, None] * d + offsets_d[None, :],
             mask=kv_mask,
             other=0.0,
         )
         data_v = tl.load(
-            V_ptr + offsets_n[:, None] * stride_vn + offsets_d[None, :] * stride_vd,
+            V_ptr + offsets_n[:, None] * d + offsets_d[None, :],
             mask=kv_mask,
             other=0.0,
         )
@@ -277,7 +275,6 @@ def fused_attention_intr(
             attn = tl.dot(data_q, data_k.T, input_precision="ieee") * scale
         else:
             attn = tl.dot(data_q, data_k.T) * scale
-        attn = tl.where(mask_m & (offsets_n[None, :] < N), attn, -float("inf"))
         if STAGE == 2:
             attn = tl.where(offsets_m[:, None] >= offsets_n[None, :], attn, -float("inf"))
         tmp_max = tl.max(attn, axis=-1, keep_dims=True)
@@ -305,34 +302,26 @@ def fused_attention(
     output,
     M,
     N,
-    d,
+    d: tl.constexpr,
     scale,
     stride_qh,
-    stride_qm,
-    stride_qd,
     stride_kh,
-    stride_kn,
-    stride_kd,
     stride_vh,
-    stride_vn,
-    stride_vd,
     stride_oh,
-    stride_om,
-    stride_od,
     is_causal: tl.constexpr,
     groups: tl.constexpr,
     BLOCK_SIZE_M: tl.constexpr,
     BLOCK_SIZE_N: tl.constexpr,
-    BLOCK_SIZE_K: tl.constexpr,
+    HEAD_DIM: tl.constexpr,
     USE_FP32_ACCUM: tl.constexpr,
     dtype: tl.constexpr,
 ):
     pid_qh = tl.program_id(1)  # BxH ，放到一个编号中
     pid_kh = (pid_qh) // groups  # KV 的编号向下整除 组数，不用分离 B和H，自然和Q在同一个B中
     pid = tl.program_id(0)
-    result_o = tl.zeros((BLOCK_SIZE_M, BLOCK_SIZE_K), dtype=tl.float32)
+    result_o = tl.zeros((BLOCK_SIZE_M, HEAD_DIM), dtype=tl.float32)
     offsets_qm = pid * BLOCK_SIZE_M + tl.arange(0, BLOCK_SIZE_M)
-    offsets_qd = tl.arange(0, BLOCK_SIZE_K)
+    offsets_qd = tl.arange(0, HEAD_DIM)
 
     Q_ptr = Q + pid_qh * stride_qh
     K_ptr = K + pid_kh * stride_kh
@@ -343,7 +332,7 @@ def fused_attention(
     mask_d = offsets_qd < d
 
     data_q = tl.load(
-        Q_ptr + offsets_qm[:, None] * stride_qm + offsets_qd[None, :] * stride_qd,
+        Q_ptr + offsets_qm[:, None] * d + offsets_qd[None, :],
         mask=mask_m & mask_d,
         other=0.0,
     )
@@ -355,12 +344,10 @@ def fused_attention(
             data_q, 
             K_ptr, V_ptr,
             result_o, max_val, dominator,
-            M, N,
+            M, N, d,
             pid,
             scale,
-            stride_kn, stride_kd,
-            stride_vn, stride_vd,
-            mask_d, mask_m,
+            mask_d,
             offsets_qd, offsets_n,
             offsets_qm,
             1,
@@ -373,12 +360,10 @@ def fused_attention(
             data_q, 
             K_ptr, V_ptr,
             result_o, max_val, dominator,
-            M, N,
+            M, N, d,
             pid,
             scale,
-            stride_kn, stride_kd,
-            stride_vn, stride_vd,
-            mask_d, mask_m,
+            mask_d,
             offsets_qd, offsets_n,
             offsets_qm,
             2,
@@ -392,12 +377,10 @@ def fused_attention(
             data_q, 
             K_ptr, V_ptr,
             result_o, max_val, dominator,
-            M, N,
+            M, N, d,
             pid,
             scale,
-            stride_kn, stride_kd,
-            stride_vn, stride_vd,
-            mask_d, mask_m,
+            mask_d,
             offsets_qd, offsets_n,
             offsets_qm,
             3,
@@ -409,7 +392,7 @@ def fused_attention(
     result_o = (result_o / dominator).to(dtype)
 
     tl.store(
-        O_ptr + offsets_qm[:, None] * stride_om + offsets_qd[None, :] * stride_od,
+        O_ptr + offsets_qm[:, None] * d + offsets_qd[None, :],
         result_o.to(dtype),
         mask=mask_d & mask_m,
     )
@@ -442,10 +425,7 @@ def flash_attention(Q: torch.Tensor, K: torch.Tensor, V: torch.Tensor, is_causal
         Q, K, V, output,
         M, N, D,
         scale,
-        Q.stride(1), Q.stride(2), Q.stride(3),
-        K.stride(1), K.stride(2), K.stride(3),
-        V.stride(1), V.stride(2), V.stride(3),
-        output.stride(1), output.stride(2), output.stride(3),
+        Q.stride(1), K.stride(1), V.stride(1), output.stride(1),
         is_causal,
         groups,
         BLOCK_SIZE_M, BLOCK_SIZE_N, BLOCK_SIZE_K,
