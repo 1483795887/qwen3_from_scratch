@@ -2,6 +2,7 @@ import triton
 import triton.language as tl
 import torch
 import os
+import math
 
 _TRITON_IEEE_PRECISION = os.environ.get("TRITON_IEEE_PRECISION", "0") == "1"
 
@@ -282,9 +283,9 @@ def fused_attention_intr(
         tmp_max = tl.max(attn, axis=-1, keep_dims=True)
         new_max_val = tl.maximum(max_val, tmp_max)
         attn = attn - new_max_val
-        exp_attn = tl.exp(attn)
+        exp_attn = tl.math.exp2(attn)
 
-        scale_factor = tl.exp(max_val - new_max_val)
+        scale_factor = tl.math.exp2(max_val - new_max_val)
         dominator = dominator * scale_factor + tl.sum(exp_attn, axis=-1, keep_dims=True)
         max_val = new_max_val
         exp_attn = exp_attn.to(dtype)
@@ -431,7 +432,7 @@ def flash_attention(Q: torch.Tensor, K: torch.Tensor, V: torch.Tensor, is_causal
 
     output = torch.empty_like(Q)
 
-    scale = 1.0 / (D**0.5)
+    scale = 1.0 / (D**0.5) * math.log2(math.e)
     BLOCK_SIZE_M = 32
     BLOCK_SIZE_N = 32
     BLOCK_SIZE_K = triton.next_power_of_2(max(D, 16))
