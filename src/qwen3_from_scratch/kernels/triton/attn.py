@@ -259,19 +259,19 @@ def fused_attention_intr(
         lo, hi = min(start_m * BLOCK_SIZE_M, N), min((start_m + 1) * BLOCK_SIZE_M, M)
     else:
         lo, hi = 0, N
-    for k in tl.range(lo, hi, BLOCK_SIZE_N):
+    for k in tl.range(lo, hi, BLOCK_SIZE_N, warp_specialize=True):
         k = tl.multiple_of(k, BLOCK_SIZE_N)
         kv_mask = mask_d & (offsets_n[:, None] < N)
         data_k = tl.load(
             K_ptr + offsets_n[:, None] * stride_kn + offsets_d[None, :] * stride_kd,
             mask=kv_mask,
             other=0.0,
-        ).to(dtype)
+        )
         data_v = tl.load(
             V_ptr + offsets_n[:, None] * stride_vn + offsets_d[None, :] * stride_vd,
             mask=kv_mask,
             other=0.0,
-        ).to(dtype) 
+        )
         if USE_FP32_ACCUM:
             attn = tl.dot(data_q, data_k.T, input_precision="ieee") * scale
         else:
@@ -282,11 +282,12 @@ def fused_attention_intr(
         tmp_max = tl.max(attn, axis=-1, keep_dims=True)
         new_max_val = tl.maximum(max_val, tmp_max)
         attn = attn - new_max_val
-        exp_attn = tl.exp(attn).to(dtype)
+        exp_attn = tl.exp(attn)
 
-        scale_factor = tl.exp(max_val - new_max_val).to(dtype)
+        scale_factor = tl.exp(max_val - new_max_val)
         dominator = dominator * scale_factor + tl.sum(exp_attn, axis=-1, keep_dims=True)
-        max_val = new_max_val.to(dtype)
+        max_val = new_max_val
+        exp_attn = exp_attn.to(dtype)
         if USE_FP32_ACCUM:
             result_o = result_o * scale_factor + tl.dot(exp_attn, data_v, input_precision="ieee")
         else:
@@ -344,10 +345,10 @@ def fused_attention(
         Q_ptr + offsets_qm[:, None] * stride_qm + offsets_qd[None, :] * stride_qd,
         mask=mask_m & mask_d,
         other=0.0,
-    ).to(dtype)
+    )
     offsets_n = tl.arange(0, BLOCK_SIZE_N)
-    max_val = tl.zeros((BLOCK_SIZE_M, 1), dtype=dtype) - float("inf")
-    dominator = tl.zeros((BLOCK_SIZE_M, 1), dtype=dtype)
+    max_val = tl.zeros((BLOCK_SIZE_M, 1), dtype=tl.float32) - float("inf")
+    dominator = tl.zeros((BLOCK_SIZE_M, 1), dtype=tl.float32)
     if is_causal:
         result_o, max_val, dominator, offsets_n = fused_attention_intr(
             data_q, 
