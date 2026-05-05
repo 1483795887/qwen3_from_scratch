@@ -234,6 +234,66 @@ def scaled_dot_production(
     )
     return output
 
+@triton.jit
+def fused_attention_intr(
+    data_q,
+    K_ptr, V_ptr,
+    result_o, max_val, dominator,
+    M, N,
+    start_m,
+    scale,
+    stride_kn, stride_kd,
+    stride_vn, stride_vd,
+    mask_d, mask_m,
+    offsets_d, offsets_n,
+    offsets_m,
+    STAGE: tl.constexpr,
+    BLOCK_SIZE_M: tl.constexpr,
+    BLOCK_SIZE_N: tl.constexpr,
+    USE_FP32_ACCUM: tl.constexpr,
+    dtype: tl.constexpr
+):
+    if STAGE == 1:
+        lo, hi = 0, min(start_m * BLOCK_SIZE_M, N)
+    elif STAGE == 2:
+        lo, hi = min(start_m * BLOCK_SIZE_M, N), min((start_m + 1) * BLOCK_SIZE_M, M)
+    else:
+        lo, hi = 0, N
+    for k in tl.range(lo, hi, BLOCK_SIZE_N):
+        k = tl.multiple_of(k, BLOCK_SIZE_N)
+        kv_mask = mask_d & (offsets_n[:, None] < N)
+        data_k = tl.load(
+            K_ptr + offsets_n[:, None] * stride_kn + offsets_d[None, :] * stride_kd,
+            mask=kv_mask,
+            other=0.0,
+        ).to(dtype)
+        data_v = tl.load(
+            V_ptr + offsets_n[:, None] * stride_vn + offsets_d[None, :] * stride_vd,
+            mask=kv_mask,
+            other=0.0,
+        ).to(dtype) 
+        if USE_FP32_ACCUM:
+            attn = tl.dot(data_q, data_k.T, input_precision="ieee") * scale
+        else:
+            attn = tl.dot(data_q, data_k.T) * scale
+        attn = tl.where(mask_m & (offsets_n[None, :] < N), attn, -float("inf"))
+        if STAGE == 2:
+            attn = tl.where(offsets_m[:, None] >= offsets_n[None, :], attn, -float("inf"))
+        tmp_max = tl.max(attn, axis=-1, keep_dims=True)
+        new_max_val = tl.maximum(max_val, tmp_max)
+        attn = attn - new_max_val
+        exp_attn = tl.exp(attn).to(dtype)
+
+        scale_factor = tl.exp(max_val - new_max_val).to(dtype)
+        dominator = dominator * scale_factor + tl.sum(exp_attn, axis=-1, keep_dims=True)
+        max_val = new_max_val.to(dtype)
+        if USE_FP32_ACCUM:
+            result_o = result_o * scale_factor + tl.dot(exp_attn, data_v, input_precision="ieee")
+        else:
+            result_o = result_o * scale_factor + tl.dot(exp_attn, data_v)
+
+        offsets_n += BLOCK_SIZE_N
+    return result_o, max_val, dominator, offsets_n
 
 @triton.jit
 def fused_attention(
@@ -285,46 +345,65 @@ def fused_attention(
         mask=mask_m & mask_d,
         other=0.0,
     ).to(dtype)
-
+    offsets_n = tl.arange(0, BLOCK_SIZE_N)
     max_val = tl.zeros((BLOCK_SIZE_M, 1), dtype=dtype) - float("inf")
     dominator = tl.zeros((BLOCK_SIZE_M, 1), dtype=dtype)
     if is_causal:
-        hi =  min(N, (pid + 1) * BLOCK_SIZE_M)
+        result_o, max_val, dominator, offsets_n = fused_attention_intr(
+            data_q, 
+            K_ptr, V_ptr,
+            result_o, max_val, dominator,
+            M, N,
+            pid,
+            scale,
+            stride_kn, stride_kd,
+            stride_vn, stride_vd,
+            mask_d, mask_m,
+            offsets_qd, offsets_n,
+            offsets_qm,
+            1,
+            BLOCK_SIZE_M,
+            BLOCK_SIZE_N,
+            USE_FP32_ACCUM,
+            dtype,
+        )
+        result_o, max_val, dominator, offsets_n = fused_attention_intr(
+            data_q, 
+            K_ptr, V_ptr,
+            result_o, max_val, dominator,
+            M, N,
+            pid,
+            scale,
+            stride_kn, stride_kd,
+            stride_vn, stride_vd,
+            mask_d, mask_m,
+            offsets_qd, offsets_n,
+            offsets_qm,
+            2,
+            BLOCK_SIZE_M,
+            BLOCK_SIZE_N,
+            USE_FP32_ACCUM,
+            dtype,
+        )
     else:
-        hi = N
-    for k in tl.range(0, hi, BLOCK_SIZE_N):
-        k = tl.multiple_of(k, BLOCK_SIZE_N)
-        offsets_kk = k + tl.arange(0, BLOCK_SIZE_N)
-        kv_mask = mask_d & (offsets_kk[:, None] < N)
-        data_k = tl.load(
-            K_ptr + offsets_kk[:, None] * stride_kn + offsets_qd[None, :] * stride_kd,
-            mask=kv_mask,
-            other=0.0,
-        ).to(dtype)
-        data_v = tl.load(
-            V_ptr + offsets_kk[:, None] * stride_vn + offsets_qd[None, :] * stride_vd,
-            mask=kv_mask,
-            other=0.0,
-        ).to(dtype) 
-        if USE_FP32_ACCUM:
-            attn = tl.dot(data_q, data_k.T, input_precision="ieee") * scale
-        else:
-            attn = tl.dot(data_q, data_k.T) * scale
-        attn = tl.where(mask_m & (offsets_kk[None, :] < N), attn, -float("inf"))
-        if is_causal:
-            attn = tl.where(offsets_qm[:, None] >= offsets_kk[None, :], attn, -float("inf"))
-        tmp_max = tl.max(attn, axis=-1, keep_dims=True)
-        new_max_val = tl.maximum(max_val, tmp_max)
-        attn = attn - new_max_val
-        exp_attn = tl.exp(attn).to(dtype)
-
-        scale_factor = tl.exp(max_val - new_max_val).to(dtype)
-        dominator = dominator * scale_factor + tl.sum(exp_attn, axis=-1, keep_dims=True)
-        max_val = new_max_val.to(dtype)
-        if USE_FP32_ACCUM:
-            result_o = result_o * scale_factor + tl.dot(exp_attn, data_v, input_precision="ieee")
-        else:
-            result_o = result_o * scale_factor + tl.dot(exp_attn, data_v)
+        result_o, max_val, dominator, offsets_n = fused_attention_intr(
+            data_q, 
+            K_ptr, V_ptr,
+            result_o, max_val, dominator,
+            M, N,
+            pid,
+            scale,
+            stride_kn, stride_kd,
+            stride_vn, stride_vd,
+            mask_d, mask_m,
+            offsets_qd, offsets_n,
+            offsets_qm,
+            3,
+            BLOCK_SIZE_M,
+            BLOCK_SIZE_N,
+            USE_FP32_ACCUM,
+            dtype,
+        )
     result_o = (result_o / dominator).to(dtype)
 
     tl.store(
