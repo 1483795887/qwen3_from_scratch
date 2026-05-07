@@ -1,5 +1,8 @@
 import os
 
+# 在导入任何模块之前设置环境变量
+os.environ["TRITON_IEEE_PRECISION"] = "1"
+
 import pytest
 import torch
 from transformers import Qwen3Config
