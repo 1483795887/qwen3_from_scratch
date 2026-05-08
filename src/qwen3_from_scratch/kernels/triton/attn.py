@@ -147,7 +147,7 @@ def softmax(
         row = tl.load(input_ptr, mask=mask & ((not is_causal) | (col_offsets <= row_idx)), other=-float("inf"))
         max_val = tl.max(row)
         row = row - max_val
-        row = tl.exp(row)
+        row = tl.math.exp2(row)
         sum_val = tl.sum(row)
         row = row / sum_val
         tl.store(input_ptr, row, mask=mask)
@@ -191,7 +191,7 @@ def scaled_dot_production(
         attn.stride(1),
         attn.stride(2),
         attn.stride(3),
-        scale,
+        scale * math.log2(math.e),
         groups,
         BLOCK_SIZE_M,
         BLOCK_SIZE_N,
