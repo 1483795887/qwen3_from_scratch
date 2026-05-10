@@ -15,9 +15,9 @@ def benchmark():
     dtype = torch.float16
     seq_len = 1024
     batch_size = 2
-    q = torch.randn((batch_size, num_q_heads, seq_len, head_dim), dtype=dtype, device=DEVICE)
-    k = torch.randn((batch_size, num_kv_heads, seq_len, head_dim), dtype=dtype, device=DEVICE)
-    v = torch.randn((batch_size, num_kv_heads, seq_len, head_dim), dtype=dtype, device=DEVICE)
+    q = torch.randn((batch_size, seq_len, num_q_heads, head_dim), dtype=dtype, device=DEVICE).transpose(1,2)
+    k = torch.randn((batch_size, seq_len, num_kv_heads, head_dim), dtype=dtype, device=DEVICE).transpose(1,2)
+    v = torch.randn((batch_size, seq_len, num_kv_heads, head_dim), dtype=dtype, device=DEVICE).transpose(1,2)
 
     config = ModelConfig(
         hidden_size=D,

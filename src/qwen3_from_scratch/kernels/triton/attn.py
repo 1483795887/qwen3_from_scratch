@@ -152,15 +152,25 @@ def softmax(
         row = row / sum_val
         tl.store(input_ptr, row, mask=mask)
 
-
-def scaled_dot_production(
-    Q: torch.Tensor, K: torch.Tensor, V: torch.Tensor, is_causal: bool = True
-):
+def sdpa_shape_assert(Q: torch.Tensor, K: torch.Tensor, V: torch.Tensor):
     assert len(Q.shape) == 4
     assert len(K.shape) == 4
     assert len(V.shape) == 4
     assert K.shape == V.shape
     assert K.shape[-1] == Q.shape[-1]
+
+    B, Hq, M, D = Q.shape
+    _, Hk, N, _ = K.shape
+    assert Hq % Hk == 0
+    assert Q.stride(1) == D, f"Q stride mismatch: {Q.stride(1)} vs {D}"
+    assert K.stride(1) == D, f"K stride mismatch: {K.stride(1)} vs {D}"
+    assert V.stride(1) == D, f"V stride mismatch: {V.stride(1)} vs {D}"
+
+
+def scaled_dot_production(
+    Q: torch.Tensor, K: torch.Tensor, V: torch.Tensor, is_causal: bool = True
+):
+    sdpa_shape_assert(Q, K, V)
 
     B, Hq, M, D = Q.shape
     _, Hk, N, _ = K.shape
@@ -240,7 +250,7 @@ def fused_attention_intr(
     data_q,
     K_ptr, V_ptr,
     result_o, max_val, dominator,
-    M, N, d: tl.constexpr,
+    N_QUERY, N_KEY, STRIDE_N_KV: tl.constexpr,
     start_m,
     scale,
     mask_d,
@@ -253,21 +263,21 @@ def fused_attention_intr(
     dtype: tl.constexpr
 ):
     if STAGE == 1:
-        lo, hi = 0, min(start_m * BLOCK_SIZE_M, N)
+        lo, hi = 0, min(start_m * BLOCK_SIZE_M, N_KEY)
     elif STAGE == 2:
-        lo, hi = min(start_m * BLOCK_SIZE_M, N), min((start_m + 1) * BLOCK_SIZE_M, M)
+        lo, hi = min(start_m * BLOCK_SIZE_M, N_KEY), min((start_m + 1) * BLOCK_SIZE_M, N_QUERY)
     else:
-        lo, hi = 0, N
+        lo, hi = 0, N_KEY
     for k in tl.range(lo, hi, BLOCK_SIZE_N, warp_specialize=True):
         k = tl.multiple_of(k, BLOCK_SIZE_N)
-        kv_mask = mask_d & (offsets_n[:, None] < N)
+        kv_mask = mask_d & (offsets_n[:, None] < N_KEY)
         data_k = tl.load(
-            K_ptr + offsets_n[:, None] * d + offsets_d[None, :],
+            K_ptr + offsets_n[:, None] * STRIDE_N_KV + offsets_d[None, :],
             mask=kv_mask,
             other=0.0,
         )
         data_v = tl.load(
-            V_ptr + offsets_n[:, None] * d + offsets_d[None, :],
+            V_ptr + offsets_n[:, None] * STRIDE_N_KV + offsets_d[None, :],
             mask=kv_mask,
             other=0.0,
         )
@@ -296,43 +306,40 @@ def fused_attention_intr(
 
 @triton.jit
 def fused_attention(
-    Q,
-    K,
-    V,
-    output,
-    M,
-    N,
-    d: tl.constexpr,
+    Q, K, V, output,
+    N_QUERY, N_KEY, HEAD_QUERY:tl.constexpr, HEAD_DIM: tl.constexpr,
     scale,
-    stride_qh,
-    stride_kh,
-    stride_vh,
-    stride_oh,
     is_causal: tl.constexpr,
     groups: tl.constexpr,
     BLOCK_SIZE_M: tl.constexpr,
     BLOCK_SIZE_N: tl.constexpr,
-    HEAD_DIM: tl.constexpr,
+    BLOCK_SIZE_DIM: tl.constexpr,
     USE_FP32_ACCUM: tl.constexpr,
     dtype: tl.constexpr,
 ):
-    pid_qh = tl.program_id(1)  # BxH ，放到一个编号中
-    pid_kh = (pid_qh) // groups  # KV 的编号向下整除 组数，不用分离 B和H，自然和Q在同一个B中
-    pid = tl.program_id(0)
-    result_o = tl.zeros((BLOCK_SIZE_M, HEAD_DIM), dtype=tl.float32)
-    offsets_qm = pid * BLOCK_SIZE_M + tl.arange(0, BLOCK_SIZE_M)
-    offsets_qd = tl.arange(0, HEAD_DIM)
+    b_id = tl.program_id(2)
+    h_id = tl.program_id(1)
+    h_id_kv = h_id // groups
+    n_q_id = tl.program_id(0)
+    result_o = tl.zeros((BLOCK_SIZE_M, BLOCK_SIZE_DIM), dtype=tl.float32)
+    offsets_qm = n_q_id * BLOCK_SIZE_M + tl.arange(0, BLOCK_SIZE_M)
+    offsets_qd = tl.arange(0, BLOCK_SIZE_DIM)
 
-    Q_ptr = Q + pid_qh * stride_qh
-    K_ptr = K + pid_kh * stride_kh
-    V_ptr = V + pid_kh * stride_vh
-    O_ptr = output + pid_qh * stride_oh
+    STRIDE_N_QO = HEAD_DIM * HEAD_QUERY
+    STRIDE_N_KV = STRIDE_N_QO // groups
+    STRIDE_B_QO = N_QUERY * STRIDE_N_QO
+    STRIDE_B_KV = N_KEY * STRIDE_N_KV
 
-    mask_m = offsets_qm[:, None] < M
-    mask_d = offsets_qd < d
+    Q_ptr = Q + b_id * STRIDE_B_QO + h_id * HEAD_DIM
+    K_ptr = K + b_id * STRIDE_B_KV + h_id_kv * HEAD_DIM
+    V_ptr = V + b_id * STRIDE_B_KV + h_id_kv * HEAD_DIM
+    O_ptr = output + b_id * STRIDE_B_QO + h_id * HEAD_DIM
+
+    mask_m = offsets_qm[:, None] < N_QUERY
+    mask_d = offsets_qd < HEAD_DIM
 
     data_q = tl.load(
-        Q_ptr + offsets_qm[:, None] * d + offsets_qd[None, :],
+        Q_ptr + offsets_qm[:, None] * STRIDE_N_QO + offsets_qd[None, :],
         mask=mask_m & mask_d,
         other=0.0,
     )
@@ -343,9 +350,9 @@ def fused_attention(
         result_o, max_val, dominator, offsets_n = fused_attention_intr(
             data_q, 
             K_ptr, V_ptr,
-            result_o, max_val, dominator,
-            M, N, d,
-            pid,
+            result_o, max_val, dominator, 
+            N_QUERY, N_KEY, STRIDE_N_KV,
+            n_q_id,
             scale,
             mask_d,
             offsets_qd, offsets_n,
@@ -360,8 +367,8 @@ def fused_attention(
             data_q, 
             K_ptr, V_ptr,
             result_o, max_val, dominator,
-            M, N, d,
-            pid,
+            N_QUERY, N_KEY, STRIDE_N_KV,
+            n_q_id,
             scale,
             mask_d,
             offsets_qd, offsets_n,
@@ -377,8 +384,8 @@ def fused_attention(
             data_q, 
             K_ptr, V_ptr,
             result_o, max_val, dominator,
-            M, N, d,
-            pid,
+            N_QUERY, N_KEY, STRIDE_N_QO,
+            n_q_id,
             scale,
             mask_d,
             offsets_qd, offsets_n,
@@ -392,22 +399,16 @@ def fused_attention(
     result_o = (result_o / dominator).to(dtype)
 
     tl.store(
-        O_ptr + offsets_qm[:, None] * d + offsets_qd[None, :],
+        O_ptr + offsets_qm[:, None] * STRIDE_N_QO + offsets_qd[None, :],
         result_o.to(dtype),
         mask=mask_d & mask_m,
     )
-
 
 # Q, K, V, output are tensors on the GPU
 
 
 def flash_attention(Q: torch.Tensor, K: torch.Tensor, V: torch.Tensor, is_causal:bool=True):
-    assert len(Q.shape) == 4
-    assert len(K.shape) == 4
-    assert len(V.shape) == 4
-    assert K.shape == V.shape
-    assert K.shape[-1] == Q.shape[-1]
-
+    sdpa_shape_assert(Q, K, V)
     B, Hq, M, D = Q.shape
     _, Hk, N, _ = K.shape
     assert Hq % Hk == 0
@@ -419,13 +420,12 @@ def flash_attention(Q: torch.Tensor, K: torch.Tensor, V: torch.Tensor, is_causal
     BLOCK_SIZE_M = 32
     BLOCK_SIZE_N = 32
     BLOCK_SIZE_K = triton.next_power_of_2(max(D, 16))
-    grid = (triton.cdiv(M, BLOCK_SIZE_M), Hq * B)
+    grid = (triton.cdiv(M, BLOCK_SIZE_M), Hq , B)
     dtype = tl.float32 if Q.dtype == torch.float32 else (tl.float16 if Q.dtype == torch.float16 else tl.bfloat16)
     fused_attention[grid](
         Q, K, V, output,
-        M, N, D,
+        M, N, Hq, D,
         scale,
-        Q.stride(1), K.stride(1), V.stride(1), output.stride(1),
         is_causal,
         groups,
         BLOCK_SIZE_M, BLOCK_SIZE_N, BLOCK_SIZE_K,
@@ -478,9 +478,9 @@ def cpu_forward(q, k, v, head_dim, is_causal: bool = True):
 
 def main():
     for dtype in [torch.float32, torch.float16, torch.bfloat16]:
-        q = torch.arange(0, 12, dtype=dtype, device="cuda").view([1, 1, 3, 4])
-        k = torch.arange(12, 20, dtype=dtype, device="cuda").view([1, 1, 2, 4])
-        v = torch.arange(20, 28, dtype=dtype, device="cuda").view([1, 1, 2, 4])
+        q = torch.arange(0, 12, dtype=dtype, device="cuda").view([1, 3, 4]).unsqueeze(2).transpose(1,2)
+        k = torch.arange(12, 20, dtype=dtype, device="cuda").view([1, 2, 4]).unsqueeze(2).transpose(1,2)
+        v = torch.arange(20, 28, dtype=dtype, device="cuda").view([1, 2, 4]).unsqueeze(2).transpose(1,2)
         ref_o = cpu_forward(q, k, v, 4)
         o = flash_attention(q, k, v)
         print(f"dtype={dtype}, ref_o={ref_o}, o={o}")
