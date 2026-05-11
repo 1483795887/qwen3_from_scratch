@@ -88,7 +88,7 @@ def test_gqa_against_transformers(
         assert torch.allclose(attn_output, new_o, atol=1e-5)
 
 
-@pytest.mark.parametrize("component_type", ["base"])
+@pytest.mark.parametrize("component_type", ["base", "my_op", "my_op_flash"])
 def test_gqa_against_transformers_with_cache(
     model_config, component_type, qwen3_config, device
 ):
