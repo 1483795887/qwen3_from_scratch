@@ -35,8 +35,8 @@ class SelfAttention(nn.Module):
     def forward(self, x, context: ModelContext):
         input_shape = x.shape[:-1]
         hidden_shape = (*input_shape, -1, self.config.head_dim)
-        q = self.q_norm(self.q_proj(x).view(hidden_shape).transpose(1, 2))
-        k = self.k_norm(self.k_proj(x).view(hidden_shape).transpose(1, 2))
+        q = self.q_norm(self.q_proj(x).view(hidden_shape)).transpose(1, 2)
+        k = self.k_norm(self.k_proj(x).view(hidden_shape)).transpose(1, 2)
         v = self.v_proj(x).view(hidden_shape).transpose(1, 2)
         q = self.rope(q, context)
         k = self.rope(k, context)
