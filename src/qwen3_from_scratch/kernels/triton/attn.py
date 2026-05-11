@@ -3,134 +3,9 @@ import triton.language as tl
 import torch
 import os
 import math
+from qwen3_from_scratch.kernels.triton.gemm import gemm
 
 _TRITON_IEEE_PRECISION = os.environ.get("TRITON_IEEE_PRECISION", "0") == "1"
-
-@triton.jit
-def matrix_multiplication_kernel(
-    a,
-    b,
-    c,
-    M,
-    N,
-    K,
-    stride_ah,
-    stride_am,
-    stride_ak,
-    stride_bh,
-    stride_bk,
-    stride_bn,
-    stride_ch,
-    stride_cm,
-    stride_cn,
-    scale,
-    groups: tl.constexpr,
-    BLOCK_SIZE_M: tl.constexpr,
-    BLOCK_SIZE_N: tl.constexpr,
-    BLOCK_SIZE_K: tl.constexpr,
-    USE_FP32_ACCUM: tl.constexpr,
-    a_dtype: tl.constexpr,
-):
-    pid_h = tl.program_id(2)
-    pid_m = tl.program_id(0)
-    pid_n = tl.program_id(1)
-    pid_b_h = pid_h // groups
-
-    a_ptr = a + pid_h * stride_ah
-    b_ptr = b + pid_b_h * stride_bh
-    c_ptr = c + pid_h * stride_ch
-
-    offsets_m = pid_m * BLOCK_SIZE_M + tl.arange(0, BLOCK_SIZE_M)
-    offsets_n = pid_n * BLOCK_SIZE_N + tl.arange(0, BLOCK_SIZE_N)
-    mask_m = offsets_m[:, None] < M
-    mask_n = offsets_n[None, :] < N
-    offsets_k = tl.arange(0, BLOCK_SIZE_K)
-
-    a_ptrs = (
-        a_ptr + offsets_m[:, None] * stride_am + offsets_k[None, :] * stride_ak
-    )
-    b_ptrs = (
-        b_ptr + offsets_n[None, :] * stride_bn + offsets_k[:, None] * stride_bk
-    )
-    acc = tl.zeros((BLOCK_SIZE_M, BLOCK_SIZE_N), dtype=tl.float32)
-    for k in tl.range(0, K, BLOCK_SIZE_K):
-        block_a = tl.load(a_ptrs, (offsets_k[None, :] < K - k) & mask_m, 0.0).to(a_dtype)
-        block_b = tl.load(b_ptrs, (offsets_k[:, None] < K - k) & mask_n, 0.0).to(a_dtype)
-        if USE_FP32_ACCUM:
-            acc = tl.dot(block_a, block_b, acc, input_precision="ieee")
-        else:
-            acc = tl.dot(block_a, block_b, acc)
-        a_ptrs += BLOCK_SIZE_K * stride_ak
-        b_ptrs += BLOCK_SIZE_K * stride_bk
-    tl.store(
-        c_ptr
-        + offsets_m[:, None] * stride_cm
-        + offsets_n[None, :] * stride_cn,
-        (acc * scale).to(a_dtype),
-        mask_m & mask_n,
-    )
-
-
-# MxK, NxK=>MxN
-@triton.jit
-def matrix_multiplication_kernel_with_transpose(
-    a,
-    b,
-    c,
-    M,
-    N,
-    K,
-    stride_ah,
-    stride_am,
-    stride_ak,
-    stride_bh,
-    stride_bn,
-    stride_bk,
-    stride_ch,
-    stride_cm,
-    stride_cn,
-    scale,
-    groups: tl.constexpr,
-    BLOCK_SIZE_M: tl.constexpr,
-    BLOCK_SIZE_N: tl.constexpr,
-    BLOCK_SIZE_K: tl.constexpr,
-    USE_FP32_ACCUM: tl.constexpr,
-    a_dtype: tl.constexpr,
-):
-    pid_m = tl.program_id(0)
-    pid_n = tl.program_id(1)
-    pid_h = tl.program_id(2)
-    pid_b_h = pid_h // groups
-    a_ptr = a + pid_h * stride_ah
-    b_ptr = b + pid_b_h * stride_bh
-    c_ptr = c + pid_h * stride_ch
-
-    offsets_m = (pid_m * BLOCK_SIZE_M + tl.arange(0, BLOCK_SIZE_M))[:, None]
-    ori_offsets_n = pid_n * BLOCK_SIZE_N + tl.arange(0, BLOCK_SIZE_N)
-    offsets_n = ori_offsets_n[:, None]
-    mask_m = offsets_m < M
-    mask_n = offsets_n < N
-    offsets_k = tl.arange(0, BLOCK_SIZE_K)
-
-    a_ptrs = a_ptr + offsets_m * stride_am + offsets_k[None, :] * stride_ak
-    b_ptrs = b_ptr + offsets_n * stride_bn + offsets_k[None, :] * stride_bk
-    acc = tl.zeros((BLOCK_SIZE_M, BLOCK_SIZE_N), dtype=tl.float32)
-    for k in tl.range(0, K, BLOCK_SIZE_K):
-        block_a = tl.load(a_ptrs, (offsets_k[None, :] < K - k) & mask_m, 0.0).to(a_dtype)
-        block_b = tl.load(b_ptrs, (offsets_k[None, :] < K - k) & mask_n, 0.0).to(a_dtype)
-        if USE_FP32_ACCUM:
-            acc = tl.dot(block_a, block_b.T, acc, input_precision="ieee")
-        else:
-            acc = tl.dot(block_a, block_b.T, acc)
-        a_ptrs += BLOCK_SIZE_K * stride_ak
-        b_ptrs += BLOCK_SIZE_K * stride_bk
-    tl.store(
-        c_ptr + offsets_m * stride_cm + ori_offsets_n[None, :] * stride_cn,
-        (acc * scale).to(a_dtype),
-        mask_m & (ori_offsets_n[None, :] < N),
-    )
-
-
 @triton.jit
 def softmax(
     A, head_stride, row_stride, col_stride, M, N, is_causal, BLOCK_SIZE: tl.constexpr
@@ -177,38 +52,10 @@ def scaled_dot_production(
     assert Hq % Hk == 0
     groups = Hq // Hk
 
-    scale = 1.0 / (D**0.5)
+    scale = 1.0 / (D**0.5)* math.log2(math.e)
 
-    BLOCK_SIZE_M = 128
-    BLOCK_SIZE_N = 128
-    BLOCK_SIZE_D = 32
     attn = torch.empty((B, Hq, M, N), dtype=Q.dtype, device=Q.device)
-    grid = (triton.cdiv(M, BLOCK_SIZE_M), triton.cdiv(N, BLOCK_SIZE_N), B * Hq)
-    dtype = tl.float32 if Q.dtype == torch.float32 else (tl.float16 if Q.dtype == torch.float16 else tl.bfloat16)
-    matrix_multiplication_kernel_with_transpose[grid](
-        Q,
-        K,
-        attn,
-        M,
-        N,
-        D,
-        Q.stride(1),
-        Q.stride(2),
-        Q.stride(3),
-        K.stride(1),
-        K.stride(2),
-        K.stride(3),
-        attn.stride(1),
-        attn.stride(2),
-        attn.stride(3),
-        scale * math.log2(math.e),
-        groups,
-        BLOCK_SIZE_M,
-        BLOCK_SIZE_N,
-        BLOCK_SIZE_D,
-        _TRITON_IEEE_PRECISION,
-        dtype,
-    )
+    gemm(Q, K.transpose(-1,-2), attn, attn, scale , 0.0)
 
     BLOCK_SIZE = triton.next_power_of_2(N)
     ROW_PER_BLOCK = 32
@@ -216,33 +63,8 @@ def scaled_dot_production(
     softmax[grid](
         attn, attn.stride(1), attn.stride(2), attn.stride(3), M, N, is_causal, BLOCK_SIZE
     )
-
-    grid = (triton.cdiv(M, BLOCK_SIZE_M), triton.cdiv(D, BLOCK_SIZE_N), B * Hq)
     output = torch.empty_like(Q)
-    matrix_multiplication_kernel[grid](
-        attn,
-        V,
-        output,
-        M,
-        D,
-        N,
-        attn.stride(1),
-        attn.stride(2),
-        attn.stride(3),
-        V.stride(1),
-        V.stride(2),
-        V.stride(3),
-        output.stride(1),
-        output.stride(2),
-        output.stride(3),
-        1.0,
-        groups,
-        BLOCK_SIZE_M,
-        BLOCK_SIZE_N,
-        BLOCK_SIZE_D,
-        _TRITON_IEEE_PRECISION,
-        dtype,
-    )
+    gemm(attn, V, output, output, 1.0, 0.0)
     return output
 
 @triton.jit
@@ -485,9 +307,9 @@ def main():
         o = flash_attention(q, k, v)
         print(f"dtype={dtype}, ref_o={ref_o}, o={o}")
     for dtype in [torch.float32, torch.float16, torch.bfloat16]:
-        q = torch.arange(0, 12, dtype=dtype, device="cuda").view([1, 1, 3, 4])
-        k = torch.arange(12, 20, dtype=dtype, device="cuda").view([1, 1, 2, 4])
-        v = torch.arange(20, 28, dtype=dtype, device="cuda").view([1, 1, 2, 4])
+        q = torch.arange(0, 12, dtype=dtype, device="cuda").view([1, 3, 4]).unsqueeze(2).transpose(1,2)
+        k = torch.arange(12, 20, dtype=dtype, device="cuda").view([1, 2, 4]).unsqueeze(2).transpose(1,2)
+        v = torch.arange(20, 28, dtype=dtype, device="cuda").view([1, 2, 4]).unsqueeze(2).transpose(1,2)
         ref_o = cpu_forward(q, k, v, 4)
         o = scaled_dot_production(q, k, v)
         print(f"scaled_dot_production dtype={dtype}, ref_o={ref_o}, o={o}")
