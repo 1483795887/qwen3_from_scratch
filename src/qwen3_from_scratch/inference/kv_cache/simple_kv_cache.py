@@ -22,10 +22,10 @@ class SimpleKVCache(KVCache):
             self.v_cache[layer_idx] = v
         else:
             self.k_cache[layer_idx] = torch.cat(
-                [self.k_cache[layer_idx], k], dim=2
+                [self.k_cache[layer_idx], k], dim=1
             )
             self.v_cache[layer_idx] = torch.cat(
-                [self.v_cache[layer_idx], v], dim=2
+                [self.v_cache[layer_idx], v], dim=1
             )
         return self.k_cache[layer_idx], self.v_cache[layer_idx]
 

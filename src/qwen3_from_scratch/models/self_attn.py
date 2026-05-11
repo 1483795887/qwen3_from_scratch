@@ -41,7 +41,9 @@ class SelfAttention(nn.Module):
         q = self.rope(q, context)
         k = self.rope(k, context)
         if context.use_cache:
-            k,v = context.kv_cache.update(k, v, self.layer_idx, context.cache_position)
+            k,v = context.kv_cache.update(k.transpose(1, 2), v.transpose(1,2), self.layer_idx, context.cache_position)
+            k = k.transpose(1, 2)
+            v = v.transpose(1, 2)
         o = (
             self.gqa(q, k, v)
             .transpose(1, 2)
