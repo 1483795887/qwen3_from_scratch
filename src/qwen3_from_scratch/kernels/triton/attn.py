@@ -3,7 +3,7 @@ import triton.language as tl
 import torch
 import os
 import math
-from qwen3_from_scratch.kernels.triton.gemm import gemm
+from qwen3_from_scratch.kernels.triton.gemm import gemm, gemm_without_c
 
 _TRITON_IEEE_PRECISION = os.environ.get("TRITON_IEEE_PRECISION", "0") == "1"
 @triton.jit
@@ -55,16 +55,16 @@ def scaled_dot_production(
     scale = 1.0 / (D**0.5)* math.log2(math.e)
 
     attn = torch.empty((B, Hq, M, N), dtype=Q.dtype, device=Q.device)
-    gemm(Q, K.transpose(-1,-2), attn, attn, scale , 0.0)
+    gemm_without_c(Q, K.transpose(-1,-2), attn, alpha=scale)
 
     BLOCK_SIZE = triton.next_power_of_2(N)
     ROW_PER_BLOCK = 32
     grid = (triton.cdiv(M, ROW_PER_BLOCK), B * Hq)
     softmax[grid](
-        attn, attn.stride(1), attn.stride(2), attn.stride(3), M, N, is_causal, BLOCK_SIZE
+        attn, attn.stride(1), attn.stride(2), attn.stride(3), M, N, is_causal and M > 1, BLOCK_SIZE
     )
     output = torch.empty_like(Q)
-    gemm(attn, V, output, output, 1.0, 0.0)
+    gemm_without_c(attn, V, output,alpha= 1.0)
     return output
 
 @triton.jit
@@ -206,7 +206,7 @@ def fused_attention(
             data_q, 
             K_ptr, V_ptr,
             result_o, max_val, dominator,
-            N_QUERY, N_KEY, STRIDE_N_QO,
+            N_QUERY, N_KEY, STRIDE_N_KV,
             n_q_id,
             scale,
             mask_d,
@@ -239,7 +239,7 @@ def flash_attention(Q: torch.Tensor, K: torch.Tensor, V: torch.Tensor, is_causal
     output = torch.empty_like(Q)
 
     scale = 1.0 / (D**0.5) * math.log2(math.e)
-    BLOCK_SIZE_M = 32
+    BLOCK_SIZE_M = 32 if M > 1 else 1
     BLOCK_SIZE_N = 32
     BLOCK_SIZE_K = triton.next_power_of_2(max(D, 16))
     grid = (triton.cdiv(M, BLOCK_SIZE_M), Hq , B)
@@ -248,7 +248,7 @@ def flash_attention(Q: torch.Tensor, K: torch.Tensor, V: torch.Tensor, is_causal
         Q, K, V, output,
         M, N, Hq, D,
         scale,
-        is_causal,
+        is_causal and M > 1,
         groups,
         BLOCK_SIZE_M, BLOCK_SIZE_N, BLOCK_SIZE_K,
         _TRITON_IEEE_PRECISION,
@@ -299,20 +299,29 @@ def cpu_forward(q, k, v, head_dim, is_causal: bool = True):
 
 
 def main():
-    for dtype in [torch.float32, torch.float16, torch.bfloat16]:
-        q = torch.arange(0, 12, dtype=dtype, device="cuda").view([1, 3, 4]).unsqueeze(2).transpose(1,2)
-        k = torch.arange(12, 20, dtype=dtype, device="cuda").view([1, 2, 4]).unsqueeze(2).transpose(1,2)
-        v = torch.arange(20, 28, dtype=dtype, device="cuda").view([1, 2, 4]).unsqueeze(2).transpose(1,2)
-        ref_o = cpu_forward(q, k, v, 4)
-        o = flash_attention(q, k, v)
-        print(f"dtype={dtype}, ref_o={ref_o}, o={o}")
-    for dtype in [torch.float32, torch.float16, torch.bfloat16]:
-        q = torch.arange(0, 12, dtype=dtype, device="cuda").view([1, 3, 4]).unsqueeze(2).transpose(1,2)
-        k = torch.arange(12, 20, dtype=dtype, device="cuda").view([1, 2, 4]).unsqueeze(2).transpose(1,2)
-        v = torch.arange(20, 28, dtype=dtype, device="cuda").view([1, 2, 4]).unsqueeze(2).transpose(1,2)
-        ref_o = cpu_forward(q, k, v, 4)
-        o = scaled_dot_production(q, k, v)
-        print(f"scaled_dot_production dtype={dtype}, ref_o={ref_o}, o={o}")
+  print()
+  for dtype in [
+    torch.float32, 
+    # torch.float16, 
+    # torch.bfloat16
+  ]:
+      M = 1
+      B = 2
+      N = 1023
+      D = 128
+      H = 16
+      groups = 2
+      q = torch.rand(B, M, H, D, dtype=dtype, device='cuda').transpose(1,2)
+      k = torch.rand(B, N, H//groups, D, dtype=dtype, device='cuda').transpose(1,2)
+      v = torch.rand(B, N, H//groups, D, dtype=dtype, device='cuda').transpose(1,2)
+      ref_o = cpu_forward(q, k, v, 4)
+      o = flash_attention(q, k, v)
+      sdpa_o = scaled_dot_production(q,k,v)
+      # print(f"dtype={dtype}, ref_o={ref_o}, o={o}, sdpa={sdpa_o}")
+      diff_fr = (o - ref_o).abs().max()
+      print(diff_fr)
+      diff_sr = (sdpa_o - ref_o).abs().max()
+      print(diff_sr)
 
 
 if __name__ == "__main__":
