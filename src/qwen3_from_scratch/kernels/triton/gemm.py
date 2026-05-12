@@ -151,10 +151,10 @@ def gemm(
         a,b,c,d,
         alpha, beta,
         M, N, Ha, K, Ha // Hb,
-        a.stride(0), a.stride(1), a.stride(-2), a.stride(-1),
-        b.stride(0), b.stride(1), b.stride(-2), b.stride(-1),
-        c.stride(0), c.stride(1), c.stride(-2), c.stride(-1),
-        d.stride(0), d.stride(1), d.stride(-2), d.stride(-1),
+        a.stride(0), a.stride(1), a.stride(2), a.stride(3),
+        b.stride(0), b.stride(1), b.stride(2), b.stride(3),
+        c.stride(0), c.stride(1), c.stride(2), c.stride(3),
+        d.stride(0), d.stride(1), d.stride(2), d.stride(3),
         BLOCK_SIZE_M, BLOCK_SIZE_N, BLOCK_SIZE_D,
         _TRITON_IEEE_PRECISION, is_c_needed=is_c_needed
     )
@@ -177,7 +177,7 @@ def grouped_gemm_kernel(
   shapes, n_groups, lds,
   activation: int,
   BLOCK_SIZE_M: tl.constexpr, BLOCK_SIZE_N: tl.constexpr, BLOCK_SIZE_K: tl.constexpr,
-  dtype: tl.constexpr
+  ab_dtype: tl.constexpr, cd_dtype: tl.constexpr
 ):
   num_ctas = tl.num_programs(0)
   tile_id = tl.program_id(0)
@@ -186,10 +186,10 @@ def grouped_gemm_kernel(
     m = tl.load(shapes + 3 * g)
     n = tl.load(shapes + 3 * g + 1)
     k = tl.load(shapes + 3 * g + 2)
-    a_ptr = tl.load(a_ptrs + g).to(tl.pointer_type(dtype))
-    b_ptr = tl.load(b_ptrs + g).to(tl.pointer_type(dtype))
-    c_ptr = tl.load(c_ptrs + g).to(tl.pointer_type(dtype))
-    d_ptr = tl.load(d_ptrs + g).to(tl.pointer_type(dtype))
+    a_ptr = tl.load(a_ptrs + g).to(tl.pointer_type(ab_dtype))
+    b_ptr = tl.load(b_ptrs + g).to(tl.pointer_type(ab_dtype))
+    c_ptr = tl.load(c_ptrs + g).to(tl.pointer_type(cd_dtype))
+    d_ptr = tl.load(d_ptrs + g).to(tl.pointer_type(cd_dtype))
     alpha = tl.load(alpha_ptrs + g)
     beta = tl.load(beta_ptrs + g)
     ldam = tl.load(lds + 8 * g)
@@ -217,9 +217,12 @@ def grouped_gemm_kernel(
       desc_c = tl.make_block_ptr(c_ptr, (m,n), (ldcm, ldcn), [offset_m, offset_n], (BLOCK_SIZE_M, BLOCK_SIZE_N), order=(1,0))
       desc_d = tl.make_block_ptr(d_ptr, (m,n), (lddm, lddn), [offset_m, offset_n], (BLOCK_SIZE_M, BLOCK_SIZE_N), order=(1,0))
       acc = tl.zeros((BLOCK_SIZE_M, BLOCK_SIZE_N), dtype=tl.float32)
-      acc = gemm_kernel_core(desc_a, desc_b, acc, BLOCK_SIZE_K, k) * alpha + beta * tl.load(desc_c, boundary_check=(0,1))
+      block_c = tl.load(desc_c, boundary_check=(0,1))
+      acc = gemm_kernel_core(desc_a, desc_b, acc, BLOCK_SIZE_K, k)
+
+      acc = acc * alpha + beta * block_c
       # acc = activation_fc(acc, activation)
-      tl.store(desc_d, acc.to(dtype), boundary_check=(0, 1))
+      tl.store(desc_d, acc.to(cd_dtype), boundary_check=(0, 1))
 
       tile_id += num_ctas
 
@@ -237,12 +240,12 @@ def grouped_gemm(
   assert len(a_tensors) == len(b_tensors) == len(c_tensors) == len(alpha) == len(beta), f"grouped size should be same: len(a) {len(a_tensors)} vs len(b) {len(b_tensors)} vs len(c) {len(c_tensors)} vs len(alpha) {len(alpha)} vs len(beta) {len(beta)}"
   assert len(a_tensors) > 0
   device = a_tensors[0].device
+  ab_dtype = tl.float32 if  a_tensors[0].dtype == torch.float32 else tl.float16
+  cd_dtype = tl.float32 if d_tensors[0].dtype == torch.float32 else tl.float16
   NUM_SMS = 84
   n_groups = len(a_tensors)
-  dtype = a_tensors[0].dtype
   shapes = []
   lds = []
-  use_cs = []
   a_addrs =[]
   b_addrs = []
   c_addrs = []
@@ -285,7 +288,8 @@ def grouped_gemm(
     BLOCK_SIZE_M=BLOCK_SIZE_M,
     BLOCK_SIZE_N=BLOCK_SIZE_N,
     BLOCK_SIZE_K=BLOCK_SIZE_K,
-    dtype=tl.float32
+    ab_dtype=ab_dtype,
+    cd_dtype=cd_dtype
   )
     
 
