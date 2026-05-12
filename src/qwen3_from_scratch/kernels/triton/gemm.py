@@ -205,8 +205,9 @@ def grouped_gemm_kernel(
     num_tiles_n = tl.cdiv(n, BLOCK_SIZE_N)
     num_tiles = num_tiles_m * num_tiles_n
     while start_tile <= tile_id and tile_id < start_tile + num_tiles:
-      tile_id_m = (tile_id - start_tile) // num_tiles_n
-      tile_id_n = (tile_id - start_tile) % num_tiles_n
+      tile_in_group = tile_id - start_tile
+      tile_id_m = tile_in_group // num_tiles_n
+      tile_id_n = tile_in_group % num_tiles_n
 
       offset_m = tile_id_m * BLOCK_SIZE_M
       offset_n = tile_id_n * BLOCK_SIZE_N
@@ -218,7 +219,7 @@ def grouped_gemm_kernel(
       acc = tl.zeros((BLOCK_SIZE_M, BLOCK_SIZE_N), dtype=tl.float32)
       acc = gemm_kernel_core(desc_a, desc_b, acc, BLOCK_SIZE_K, k) * alpha + beta * tl.load(desc_c, boundary_check=(0,1))
       # acc = activation_fc(acc, activation)
-      tl.store(desc_d, acc)
+      tl.store(desc_d, acc.to(dtype), boundary_check=(0, 1))
 
       tile_id += num_ctas
 
@@ -292,7 +293,7 @@ def grouped_gemm(
 
 if __name__ == "__main__":  
     M = 128
-    N = 256
+    N = 128
     K = 1024
     groups = 1
     device= 'cuda'
@@ -311,7 +312,7 @@ if __name__ == "__main__":
       diff = (ref_d - d_tensors[g]).diff()
       print(diff.max())
 
-    M = 1
+    M = 128
     N = 128
     K = 1024
     B = 2
