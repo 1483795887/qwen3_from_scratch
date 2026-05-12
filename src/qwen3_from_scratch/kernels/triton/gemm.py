@@ -4,6 +4,7 @@ import torch
 import math
 from typing import Optional
 from enum import Enum
+import triton
 
 class ActivationType(Enum):
   Nop = 0
@@ -14,7 +15,35 @@ ACTIVATION_NOP = tl.constexpr(ActivationType.Nop.value)
 ACTIVATION_GELU = tl.constexpr(ActivationType.GELU.value)
 ACTIVATION_SILU = tl.constexpr(ActivationType.SILU.value)
 
+ACTIVATION_MAP = {
+  ActivationType.Nop: ACTIVATION_NOP,
+  ActivationType.GELU: ACTIVATION_GELU,
+  ActivationType.SILU: ACTIVATION_SILU
+}
+
 _TRITON_IEEE_PRECISION = False
+
+@triton.jit
+def activation_fc(items, activation:tl.constexpr):
+  if activation == ACTIVATION_NOP:
+    return items
+  return items
+
+@triton.jit
+def gemm_kernel_core(
+  a_ptr,
+  b_ptr,
+  acc,
+  BLOCK_SIZE_K, K
+):
+  for k in tl.range(0, K, BLOCK_SIZE_K):
+    block_a = tl.load(a_ptr, boundary_check=(0, 1))
+    block_b = tl.load(b_ptr, boundary_check=(0,1))
+    acc = tl.dot(block_a, block_b, acc)
+    a_ptr = a_ptr.advance([0, BLOCK_SIZE_K])
+    b_ptr = b_ptr.advance([BLOCK_SIZE_K, 0])
+  return acc
+
 
 @triton.jit
 def gemm_kernel(
@@ -70,15 +99,7 @@ def gemm_kernel(
     )
     dtype = d.dtype.element_ty
     acc = tl.zeros((BLOCK_SIZE_M, BLOCK_SIZE_N), dtype=tl.float32)
-    for k in tl.range(0, K, BLOCK_SIZE_K):
-        block_a = tl.load(a_ptr, boundary_check=(0,1))
-        block_b = tl.load(b_ptr, boundary_check=(0,1))
-        if USE_FP32_ACCUM:
-            acc = tl.dot(block_a, block_b, acc, input_precision="ieee")
-        else:
-            acc = tl.dot(block_a, block_b, acc)
-        a_ptr = a_ptr.advance([0, BLOCK_SIZE_K])
-        b_ptr = b_ptr.advance([BLOCK_SIZE_K, 0])
+    acc = gemm_kernel_core(a_ptr, b_ptr, acc, BLOCK_SIZE_K, K)
     if is_c_needed:
       block_c = tl.load(c_ptr, boundary_check=(0,1))
       acc = alpha * acc + beta * block_c
@@ -148,19 +169,160 @@ def gemm_without_c(
   return gemm(a,b,d,d, is_c_needed=False, alpha=alpha,beta=0.0,activation=activation)
 
 
+
+
+@triton.jit
+def grouped_gemm_kernel(
+  a_ptrs, b_ptrs, c_ptrs, d_ptrs, alpha_ptrs, beta_ptrs,
+  shapes, n_groups, lds,
+  activation: int,
+  BLOCK_SIZE_M: tl.constexpr, BLOCK_SIZE_N: tl.constexpr, BLOCK_SIZE_K: tl.constexpr,
+  dtype: tl.constexpr
+):
+  num_ctas = tl.num_programs(0)
+  tile_id = tl.program_id(0)
+  start_tile = 0
+  for g in tl.range(n_groups):
+    m = tl.load(shapes + 3 * g)
+    n = tl.load(shapes + 3 * g + 1)
+    k = tl.load(shapes + 3 * g + 2)
+    a_ptr = tl.load(a_ptrs + g).to(tl.pointer_type(dtype))
+    b_ptr = tl.load(b_ptrs + g).to(tl.pointer_type(dtype))
+    c_ptr = tl.load(c_ptrs + g).to(tl.pointer_type(dtype))
+    d_ptr = tl.load(d_ptrs + g).to(tl.pointer_type(dtype))
+    alpha = tl.load(alpha_ptrs + g)
+    beta = tl.load(beta_ptrs + g)
+    ldam = tl.load(lds + 8 * g)
+    ldak = tl.load(lds + 8 * g + 1)
+    ldbk = tl.load(lds + 8 * g + 2)
+    ldbn = tl.load(lds + 8 * g + 3)
+    ldcm = tl.load(lds + 8 * g + 4)
+    ldcn = tl.load(lds + 8 * g + 5)
+    lddm = tl.load(lds + 8 * g + 6)
+    lddn = tl.load(lds + 8 * g + 7)
+
+    num_tiles_m = tl.cdiv(m, BLOCK_SIZE_M)
+    num_tiles_n = tl.cdiv(n, BLOCK_SIZE_N)
+    num_tiles = num_tiles_m * num_tiles_n
+    while start_tile <= tile_id and tile_id < start_tile + num_tiles:
+      tile_id_m = (tile_id - start_tile) // num_tiles_n
+      tile_id_n = (tile_id - start_tile) % num_tiles_n
+
+      offset_m = tile_id_m * BLOCK_SIZE_M
+      offset_n = tile_id_n * BLOCK_SIZE_N
+
+      desc_a = tl.make_block_ptr(a_ptr, (m,k), (ldam, ldak), [offset_m, 0], (BLOCK_SIZE_M, BLOCK_SIZE_K), order=(1,0))
+      desc_b = tl.make_block_ptr(b_ptr, (k,n), (ldbk, ldbn), [0, offset_n], (BLOCK_SIZE_K, BLOCK_SIZE_N), order=(1,0))
+      desc_c = tl.make_block_ptr(c_ptr, (m,n), (ldcm, ldcn), [offset_m, offset_n], (BLOCK_SIZE_M, BLOCK_SIZE_N), order=(1,0))
+      desc_d = tl.make_block_ptr(d_ptr, (m,n), (lddm, lddn), [offset_m, offset_n], (BLOCK_SIZE_M, BLOCK_SIZE_N), order=(1,0))
+      acc = tl.zeros((BLOCK_SIZE_M, BLOCK_SIZE_N), dtype=tl.float32)
+      acc = gemm_kernel_core(desc_a, desc_b, acc, BLOCK_SIZE_K, k) * alpha + beta * tl.load(desc_c, boundary_check=(0,1))
+      # acc = activation_fc(acc, activation)
+      tl.store(desc_d, acc)
+
+      tile_id += num_ctas
+
+    start_tile += num_tiles
+
+def grouped_gemm(
+  a_tensors: list[torch.Tensor],
+  b_tensors: list[torch.Tensor],
+  c_tensors: list[torch.Tensor],
+  d_tensors: list[torch.Tensor],
+  alpha: list[float],
+  beta: list[float],
+  activation: ActivationType = ActivationType.Nop
+):
+  assert len(a_tensors) == len(b_tensors) == len(c_tensors) == len(alpha) == len(beta), f"grouped size should be same: len(a) {len(a_tensors)} vs len(b) {len(b_tensors)} vs len(c) {len(c_tensors)} vs len(alpha) {len(alpha)} vs len(beta) {len(beta)}"
+  assert len(a_tensors) > 0
+  device = a_tensors[0].device
+  NUM_SMS = 84
+  n_groups = len(a_tensors)
+  dtype = a_tensors[0].dtype
+  shapes = []
+  lds = []
+  use_cs = []
+  a_addrs =[]
+  b_addrs = []
+  c_addrs = []
+  d_addrs = []
+  for i in range(n_groups):
+    a = a_tensors[i]
+    b = b_tensors[i]
+    c = c_tensors[i]
+    d = d_tensors[i]
+    a_addrs.append(a.data_ptr())
+    b_addrs.append(b.data_ptr())
+    c_addrs.append(c.data_ptr())
+    d_addrs.append(d.data_ptr())
+
+    m,k = a.shape
+    assert b.shape[0] == k
+    _, n = b.shape
+    assert c.shape == (m,n) == d.shape
+    shapes.append([m,n,k])
+    stride_am, stride_ak = a.stride()
+    stride_bk, stride_bn = b.stride()
+    stride_cm, stride_cn = c.stride()
+    stride_dm, stride_dn = d.stride()
+
+    lds.append([stride_am, stride_ak, stride_bk, stride_bn, stride_cm, stride_cn, stride_dm, stride_dn])
+  BLOCK_SIZE_M = 128
+  BLOCK_SIZE_N = 128
+  BLOCK_SIZE_K = 32
+  grouped_gemm_kernel[[NUM_SMS]](
+    torch.tensor(a_addrs, device=device),
+    torch.tensor(b_addrs, device=device),
+    torch.tensor(c_addrs, device=device),
+    torch.tensor(d_addrs, device=device),
+    torch.tensor(alpha, dtype=torch.float32, device=device),
+    torch.tensor(beta, dtype=torch.float32, device=device),
+    torch.tensor(shapes, dtype=torch.int32, device=device),
+    n_groups = n_groups,
+    lds = torch.tensor(lds, device=device),
+    activation=ACTIVATION_MAP[activation],
+    BLOCK_SIZE_M=BLOCK_SIZE_M,
+    BLOCK_SIZE_N=BLOCK_SIZE_N,
+    BLOCK_SIZE_K=BLOCK_SIZE_K,
+    dtype=tl.float32
+  )
+    
+
+
+
 if __name__ == "__main__":  
+    M = 128
+    N = 256
+    K = 1024
+    groups = 1
+    device= 'cuda'
+    a_tensors = [torch.rand(M, K, dtype=torch.float32, device=device) * 10 for _ in range(groups)]
+    b_tensors = [torch.rand(K, N, dtype=torch.float32, device=device) * 10 for _ in range(groups)]
+    d_tensors = [torch.empty(M,N,device=device) for _ in range(groups) ]
+    alphas= [1.0] * groups
+    betas = [0.0] * groups
+
+
+
+    grouped_gemm(a_tensors, b_tensors , d_tensors, d_tensors, alphas, betas)
+    for g in range(groups):
+      ref_d = a_tensors[g] @ b_tensors[g]
+
+      diff = (ref_d - d_tensors[g]).diff()
+      print(diff.max())
+
     M = 1
     N = 128
     K = 1024
     B = 2
     dtype = torch.float32
-    a = torch.randn(B, M, K).cuda().to(dtype)
-    b = torch.randn(B, N, K).cuda().to(dtype).transpose(-2, -1)
-    c = torch.randn(B, M, N).cuda().to(dtype)
+    a = torch.randn(B, M, K).cuda().to(dtype) * 10
+    b = torch.randn(B, N, K).cuda().to(dtype).transpose(-2, -1) * 10
+    c = torch.randn(B, M, N).cuda().to(dtype) * 10
     d = torch.randn(B, M, N).cuda().to(dtype)
     
     gemm(a, b, c, d)
     ref_d = torch.matmul(a,b) + c
     diff = (ref_d - d).abs()
-    print(diff[1].max())
+    print(diff.max())
     
