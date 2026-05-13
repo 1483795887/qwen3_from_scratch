@@ -24,6 +24,9 @@ def swiglu(
     i = tl.program_id(0)
     b = tl.program_id(1)
 
+    a_dtype = x.dtype.element_ty
+    w_dtype = up_proj_weight.dtype.element_ty
+
     output_ptr = tl.make_block_ptr(
         output + b * N * D,
         (N, D),
@@ -71,7 +74,7 @@ def swiglu(
             (1, 0),
         )
         for j in tl.range(0, tl.cdiv(D, BLOCK_SIZE_D)):
-          X_ij = tl.load(x_ptr, boundary_check=(0,1))
+          X_ij = tl.load(x_ptr, boundary_check=(0,1)).to(w_dtype)
           up_weight_lj = tl.load(up_proj_ptr, boundary_check=(0,1))
           gate_weight_lj = tl.load(gate_proj_ptr, boundary_check=(0,1))
 
@@ -85,10 +88,10 @@ def swiglu(
         merged_il = up_il * gate_il / (1 + tl.exp(-gate_il))
 
         down_weight_nl = tl.load(down_proj_ptr, boundary_check=(0, 1))
-        result_in = tl.dot(merged_il, down_weight_nl.T, result_in)
+        result_in = tl.dot(merged_il.to(w_dtype), down_weight_nl.T, result_in)
         down_proj_ptr = down_proj_ptr.advance([0, BLOCK_SIZE_D1])
 
-      tl.store(output_ptr, result_in, boundary_check=(0, 1))
+      tl.store(output_ptr, result_in.to(a_dtype), boundary_check=(0, 1))
       output_ptr = output_ptr.advance([0, BLOCK_SIZE_D])
 
 
