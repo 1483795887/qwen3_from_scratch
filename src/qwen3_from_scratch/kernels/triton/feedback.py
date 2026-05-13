@@ -19,57 +19,77 @@ def swiglu(
     D1: tl.constexpr,
     BLOCK_SIZE_N: tl.constexpr,
     BLOCK_SIZE_D1: tl.constexpr,
-    BLOCK_SIZE_REDUCE: tl.constexpr,
     BLOCK_SIZE_D: tl.constexpr,
 ):
-    n_id = tl.program_id(0)
-    d_id = tl.program_id(1)
-    b_id = tl.program_id(2)
-    x_ptr = tl.make_block_ptr(
-        x + b_id * N * D,
-        (N, D),
-        (D, 1),
-        (n_id * BLOCK_SIZE_N, 0),
-        (BLOCK_SIZE_N, BLOCK_SIZE_REDUCE),
-        (1, 0),
-    )
-    up_proj_ptr = tl.make_block_ptr(
-        up_proj_weight,
-        (D1, D),
-        (D, 1),
-        (0, 0),
-        (BLOCK_SIZE_D1, BLOCK_SIZE_REDUCE),
-        (0, 0),
-    )
-    gate_proj_ptr = tl.make_block_ptr(
-        gate_proj_weight,
-        (D1, D),
-        (D, 1),
-        (0, 0),
-        (BLOCK_SIZE_D1, BLOCK_SIZE_REDUCE),
-        (0, 0),
-    )
-    down_proj_ptr = tl.make_block_ptr(
-        down_proj_weight,
-        (D, D1),
-        (D1, 1),
-        (d_id * BLOCK_SIZE_D, 0),
-        (BLOCK_SIZE_D, BLOCK_SIZE_D1),
-        (0, 0),
-    )
+    i = tl.program_id(0)
+    b = tl.program_id(1)
+
     output_ptr = tl.make_block_ptr(
-        output + b_id * N * D,
+        output + b * N * D,
         (N, D),
         (D, 1),
-        (n_id * BLOCK_SIZE_N, d_id * BLOCK_SIZE_D),
+        (i * BLOCK_SIZE_N, 0),
         (BLOCK_SIZE_N, BLOCK_SIZE_D),
         (1, 0),
     )
 
-    data_x = tl.load(x_ptr, bound_check=(0,1))
-    acc = tl.zeros((BLOCK_SIZE_N, BLOCK_SIZE_D1), dtype=tl.float32)
-    for k in tl.arange(0, D1, BLOCK_SIZE_D1):
-        pass
+    for n in tl.range(0, tl.cdiv(D, BLOCK_SIZE_D)):
+      down_proj_ptr = tl.make_block_ptr(
+        down_proj_weight,
+        (D, D1),
+        (D1, 1),
+        (n * BLOCK_SIZE_D, 0),
+        (BLOCK_SIZE_D, BLOCK_SIZE_D1),
+        (1, 0),
+      )
+      result_in = tl.zeros((BLOCK_SIZE_N, BLOCK_SIZE_D), dtype=tl.float32)
+      for l in tl.range(0, tl.cdiv(D1, BLOCK_SIZE_D1)):
+        up_il = tl.zeros((BLOCK_SIZE_N, BLOCK_SIZE_D1), dtype=tl.float32)
+        gate_il = tl.zeros((BLOCK_SIZE_N, BLOCK_SIZE_D1), dtype=tl.float32)
+        x_ptr = tl.make_block_ptr(
+            x + b * N * D,
+            (N, D),
+            (D, 1),
+            (i * BLOCK_SIZE_N, 0),
+            (BLOCK_SIZE_N, BLOCK_SIZE_D),
+            (1, 0),
+        )
+        up_proj_ptr = tl.make_block_ptr(
+            up_proj_weight,
+            (D1, D),
+            (D, 1),
+            (l * BLOCK_SIZE_D1, 0),
+            (BLOCK_SIZE_D1, BLOCK_SIZE_D),
+            (1, 0),
+        )
+        gate_proj_ptr = tl.make_block_ptr(
+            gate_proj_weight,
+            (D1, D),
+            (D, 1),
+            (l * BLOCK_SIZE_D1, 0),
+            (BLOCK_SIZE_D1, BLOCK_SIZE_D),
+            (1, 0),
+        )
+        for j in tl.range(0, tl.cdiv(D, BLOCK_SIZE_D)):
+          X_ij = tl.load(x_ptr, boundary_check=(0,1))
+          up_weight_lj = tl.load(up_proj_ptr, boundary_check=(0,1))
+          gate_weight_lj = tl.load(gate_proj_ptr, boundary_check=(0,1))
+
+          up_il = tl.dot(X_ij, up_weight_lj.T, up_il)
+          gate_il = tl.dot(X_ij, gate_weight_lj.T, gate_il)
+
+          x_ptr = x_ptr.advance([0, BLOCK_SIZE_D])
+          up_proj_ptr = up_proj_ptr.advance([0, BLOCK_SIZE_D])
+          gate_proj_ptr = gate_proj_ptr.advance([0, BLOCK_SIZE_D])
+
+        merged_il = up_il * gate_il / (1 + tl.exp(-gate_il))
+
+        down_weight_nl = tl.load(down_proj_ptr, boundary_check=(0, 1))
+        result_in = tl.dot(merged_il, down_weight_nl.T, result_in)
+        down_proj_ptr = down_proj_ptr.advance([0, BLOCK_SIZE_D1])
+
+      tl.store(output_ptr, result_in, boundary_check=(0, 1))
+      output_ptr = output_ptr.advance([0, BLOCK_SIZE_D])
 
 
 def swiglu_feedback(
@@ -77,49 +97,60 @@ def swiglu_feedback(
     up_proj_weight: torch.Tensor,
     gate_proj_weight: torch.Tensor,
     down_proj_weight: torch.Tensor,
+    output: torch.Tensor
 ):
     activation_fc = ActivationType.SILU
     B, N, D = x.shape
     BLOCK_SIZE_N = 32
-    BLOCK_SIZE_D1 = 32  # 用于 D1 循环
-    BLOCK_SIZE_REDUCE = triton.next_power_of_2(max(D, 16))  # BD * DD1 的乘法
-    BLOCK_SIZE_D = 32  # 用于 输出
+    BLOCK_SIZE_D1 = 32
+    BLOCK_SIZE_D = 128
     D1, _ = up_proj_weight.shape
-    assert up_proj_weight.shape == (D1, D)
-    assert gate_proj_weight.shape == (D1, D)
-    assert down_proj_weight.shape == (D, D1)
+    assert up_proj_weight.shape == (D1, D), f"up_proj_weight shape mismatch: expected {(D1, D)}, got {up_proj_weight.shape}"
+    assert gate_proj_weight.shape == (D1, D), f"gate_proj_weight shape mismatch: expected {(D1, D)}, got {gate_proj_weight.shape}"
+    assert down_proj_weight.shape == (D, D1), f"down_proj_weight shape mismatch: expected {(D, D1)}, got {down_proj_weight.shape}"
+    assert output.shape == x.shape, f"output shape mismatch: expected {x.shape}, got {output.shape}"
     # 简单起见要求三个都连续，也是应该的
-    assert x.is_contiguous()
-    assert up_proj_weight.is_contiguous()
-    assert gate_proj_weight.is_contiguous()
-    assert down_proj_weight.is_contiguous()
+    assert x.is_contiguous(), "x must be contiguous"
+    assert up_proj_weight.is_contiguous(), "up_proj_weight must be contiguous"
+    assert gate_proj_weight.is_contiguous(), "gate_proj_weight must be contiguous"
+    assert down_proj_weight.is_contiguous(), "down_proj_weight must be contiguous"
+    assert output.is_contiguous(), "output must be contiguous"
 
+    grid = [triton.cdiv(N, BLOCK_SIZE_N), B]
+    swiglu[grid](
+      x, up_proj_weight, gate_proj_weight, down_proj_weight, output, 
+      N, D, D1,
+      BLOCK_SIZE_N, BLOCK_SIZE_D1, BLOCK_SIZE_D
+    )
+
+
+class StandardSwiglu(torch.nn.Module):
+  def __init__(self, up_proj, gate_proj, down_proj):
+    super().__init__()
+    self.up_proj = up_proj
+    self.gate_proj = gate_proj
+    self.down_proj = down_proj
+
+  def forward(self, x):
+    embed_up = self.up_proj(x)
+    embed_gate = torch.nn.functional.silu(self.gate_proj(x))
+    return self.down_proj(embed_up * embed_gate)
 
 if __name__ == "__main__":
-    N = 16
-    D = 32
+    B = 2
+    N = 32
+    D = 1024
     D1 = D * 3
-    x = torch.rand(N, D, dtype=torch.float32)
-    up_proj = torch.nn.Linear(D, D1)
-    gate_proj = torch.nn.Linear(D, D1)
-    down_proj = torch.nn.Linear(D1, D)
+    device = 'cuda'
+    x = torch.rand(B, N, D, dtype=torch.float32, device=device)
+    up_proj = torch.nn.Linear(D, D1, bias=False)
+    gate_proj = torch.nn.Linear(D, D1, bias=False)
+    down_proj = torch.nn.Linear(D1, D, bias=False)
 
-    # ===  (AB)C
-    x1 = up_proj(x)
-    x2 = torch.nn.functional.silu(gate_proj(x))
-    x3 = down_proj(x1 * x2)
-    # === A(BC)
-    up_weights = up_proj.weight
-    gate_weights = gate_proj.weight
-    down_weights = down_proj.weight
-    fused_weights1 = torch.matmul(up_weights.T, down_weights.T)
-    fused_weights2 = torch.matmul(gate_weights.T, down_weights.T)
+    standard_model = StandardSwiglu(up_proj, gate_proj, down_proj).cuda()
+    with torch.no_grad():
+      ref_o = standard_model(x)
+      output = torch.empty_like(x)
+      swiglu_feedback(x, up_proj.weight, gate_proj.weight, down_proj.weight, output)
 
-    x4 = torch.matmul(x, fused_weights1.T)
-    x5 = torch.nn.functional.silu(torch.matmul(x, fused_weights2.T))
-    x6 = x4 * x5
-
-    print(x3.shape)
-    print(x6.shape)
-    diff = (x3 - x6).abs()
-    print(diff.max())
+      diff = (ref_o - output).abs()
