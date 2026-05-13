@@ -1,5 +1,5 @@
 import torch.nn as nn
-
+import torch
 from qwen3_from_scratch.factory import ComponentFactory, ModelConfig
 from qwen3_from_scratch.models.common import assign
 from qwen3_from_scratch.models.parameter_loader import ParameterLoader
@@ -39,3 +39,16 @@ class PythonFeedback(nn.Module):
         self.gate_proj.weight = assign(
             self.gate_proj.weight, loader.get(f"{self.name}.gate_proj.weight")
         )
+
+@ComponentFactory.register("mlp", "my_op")
+class MyFeedback(PythonFeedback):
+  def __init__(self, *args, **kwargs):
+    super().__init__(*args, **kwargs)
+
+  def forward(self, x):
+    if x.is_cuda:
+      from qwen3_from_scratch.kernels.triton.feedback import swiglu_feedback
+      output = torch.empty_like(x)
+      swiglu_feedback(x, self.up_proj.weight, self.gate_proj.weight, self.down_proj.weight, output)
+      return output
+    return super().forward(x)
