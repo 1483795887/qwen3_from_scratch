@@ -21,8 +21,6 @@ ACTIVATION_MAP = {
   ActivationType.SILU: ACTIVATION_SILU
 }
 
-_TRITON_IEEE_PRECISION = False
-
 @triton.jit
 def activation_fc(items, activation:tl.constexpr):
   if activation == ACTIVATION_NOP:
@@ -56,7 +54,7 @@ def gemm_kernel(
     stride_cb, stride_ch, stride_cm, stride_cn,
     stride_db, stride_dh, stride_dm, stride_dn,
     BLOCK_SIZE_M: tl.constexpr, BLOCK_SIZE_N: tl.constexpr, BLOCK_SIZE_K: tl.constexpr,
-    USE_FP32_ACCUM: tl.constexpr, is_c_needed:tl.constexpr = True
+    is_c_needed:tl.constexpr = True
 ):
     bh_id = tl.program_id(2)
     n_id = tl.program_id(1)
@@ -158,7 +156,7 @@ def gemm(
         c.stride(0), c.stride(1), c.stride(2), c.stride(3),
         d.stride(0), d.stride(1), d.stride(2), d.stride(3),
         BLOCK_SIZE_M, BLOCK_SIZE_N, BLOCK_SIZE_D,
-        _TRITON_IEEE_PRECISION, is_c_needed=is_c_needed
+        is_c_needed=is_c_needed
     )
 
 def gemm_without_c(
