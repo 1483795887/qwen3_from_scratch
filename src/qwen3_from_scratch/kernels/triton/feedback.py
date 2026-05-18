@@ -4,6 +4,7 @@ import triton.language as tl
 from qwen3_from_scratch.kernels.triton.gemm import (
     ActivationType,
     gemm_kernel_core,
+    linear
 )
 
 
@@ -98,7 +99,6 @@ def swiglu(
 def swiglu_feedback(
     x: torch.Tensor,
     up_proj_weight: torch.Tensor,
-    gate_proj_weight: torch.Tensor,
     down_proj_weight: torch.Tensor,
     output: torch.Tensor
 ):
@@ -109,13 +109,11 @@ def swiglu_feedback(
     BLOCK_SIZE_D = 128
     D1, _ = up_proj_weight.shape
     assert up_proj_weight.shape == (D1, D), f"up_proj_weight shape mismatch: expected {(D1, D)}, got {up_proj_weight.shape}"
-    assert gate_proj_weight.shape == (D1, D), f"gate_proj_weight shape mismatch: expected {(D1, D)}, got {gate_proj_weight.shape}"
     assert down_proj_weight.shape == (D, D1), f"down_proj_weight shape mismatch: expected {(D, D1)}, got {down_proj_weight.shape}"
     assert output.shape == x.shape, f"output shape mismatch: expected {x.shape}, got {output.shape}"
     # 简单起见要求三个都连续，也是应该的
     assert x.is_contiguous(), "x must be contiguous"
     assert up_proj_weight.is_contiguous(), "up_proj_weight must be contiguous"
-    assert gate_proj_weight.is_contiguous(), "gate_proj_weight must be contiguous"
     assert down_proj_weight.is_contiguous(), "down_proj_weight must be contiguous"
     assert output.is_contiguous(), "output must be contiguous"
 
@@ -125,6 +123,49 @@ def swiglu_feedback(
       N, D, D1,
       BLOCK_SIZE_N, BLOCK_SIZE_D1, BLOCK_SIZE_D
     )
+
+@triton.jit
+def swiglu_gate(
+  up_embed, gate_embed,
+  N, D: tl.constexpr,
+  BLOCK_SIZE_D: tl.constexpr
+):
+  d_id = tl.program_id(0)
+  n_id = tl.program_id(1)
+  offsets = d_id * BLOCK_SIZE_D + tl.arange(0, BLOCK_SIZE_D)
+  items_up = tl.load(up_embed + n_id * D * 2 +  offsets, offsets < D, 0.0)
+  items_gate = tl.load(gate_embed + n_id * D * 2 + offsets, offsets < D, 0.0).to(tl.float32)
+  items_gate *= tl.sigmoid(items_gate)
+  items_up *= items_gate.to(items_up.dtype)
+  tl.store(up_embed + n_id * D * 2+ offsets, items_up, offsets < D)
+
+def simple_swiglu(
+  x: torch.Tensor,
+  merged_weight: torch.Tensor,
+  down_proj_weight: torch.Tensor,
+  output: torch.Tensor
+):
+  B, N, D = x.shape
+  D1, _ = merged_weight.shape
+  assert D1 % 2 == 0
+  assert merged_weight.shape == (D1, D), f"merged_weight shape mismatch: expected {(D1, D)}, got {merged_weight.shape}"
+  assert down_proj_weight.shape == (D, D1 // 2), f"down_proj_weight shape mismatch: expected {(D, D1 // 2)}, got {down_proj_weight.shape}"
+  assert output.shape == x.shape, f"output shape mismatch: expected {x.shape}, got {output.shape}"
+  # 简单起见要求三个都连续，也是应该的
+  assert x.is_contiguous(), "x must be contiguous"
+  assert merged_weight.is_contiguous(), "up_proj_weight must be contiguous"
+  assert down_proj_weight.is_contiguous(), "down_proj_weight must be contiguous"
+  assert output.is_contiguous(), "output must be contiguous"
+  merged_embed = torch.empty(B, N, D1, dtype=x.dtype, device=x.device)
+  linear(x, merged_weight, merged_embed)
+  split_D = D1 // 2
+  up_embed, gate_embed = torch.split(merged_embed, [split_D, split_D], dim=-1)
+  BLOCK_SIZE_D = 128
+
+  grid = [triton.cdiv(split_D, BLOCK_SIZE_D), B*N]
+  swiglu_gate[grid](up_embed, gate_embed, B*N, split_D, BLOCK_SIZE_D)
+
+  linear(up_embed, down_proj_weight, output)
 
 
 class StandardSwiglu(torch.nn.Module):
@@ -136,8 +177,10 @@ class StandardSwiglu(torch.nn.Module):
 
   def forward(self, x):
     embed_up = self.up_proj(x)
-    embed_gate = torch.nn.functional.silu(self.gate_proj(x))
-    return self.down_proj(embed_up * embed_gate)
+    embed_gate = self.gate_proj(x)
+    embed_gate = torch.nn.functional.silu(embed_gate)
+    merged = embed_up * embed_gate
+    return self.down_proj(merged)
 
 if __name__ == "__main__":
     B = 2
@@ -146,14 +189,17 @@ if __name__ == "__main__":
     D1 = D * 3
     device = 'cuda'
     x = torch.rand(B, N, D, dtype=torch.float32, device=device)
-    up_proj = torch.nn.Linear(D, D1, bias=False)
-    gate_proj = torch.nn.Linear(D, D1, bias=False)
-    down_proj = torch.nn.Linear(D1, D, bias=False)
+    up_proj = torch.nn.Linear(D, D1, bias=False).cuda()
+    gate_proj = torch.nn.Linear(D, D1, bias=False).cuda()
+    down_proj = torch.nn.Linear(D1, D, bias=False).cuda()
 
     standard_model = StandardSwiglu(up_proj, gate_proj, down_proj).cuda()
     with torch.no_grad():
       ref_o = standard_model(x)
+      # output = torch.empty_like(x)
+      # swiglu_feedback(x, up_proj.weight, gate_proj.weight, down_proj.weight, output)
+      merged_proj = torch.concat([up_proj.weight, gate_proj.weight], 0)
       output = torch.empty_like(x)
-      swiglu_feedback(x, up_proj.weight, gate_proj.weight, down_proj.weight, output)
-
+      simple_swiglu(x, merged_proj, down_proj.weight, output)
       diff = (ref_o - output).abs()
+      print(diff.max())
