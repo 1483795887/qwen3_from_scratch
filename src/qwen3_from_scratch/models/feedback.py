@@ -44,11 +44,13 @@ class PythonFeedback(nn.Module):
 class MyFeedback(PythonFeedback):
   def __init__(self, *args, **kwargs):
     super().__init__(*args, **kwargs)
+    merged_weight = torch.concat([self.up_proj.weight, self.gate_proj.weight], dim=0)
+    self.register_buffer("merged_weight", merged_weight, persistent=False)
 
   def forward(self, x):
     if x.is_cuda:
-      from qwen3_from_scratch.kernels.triton.feedback import swiglu_feedback
+      from qwen3_from_scratch.kernels.triton.feedback import simple_swiglu
       output = torch.empty_like(x)
-      swiglu_feedback(x, self.up_proj.weight, self.gate_proj.weight, self.down_proj.weight, output)
+      simple_swiglu(x, self.merged_weight, self.down_proj.weight, output)
       return output
     return super().forward(x)
