@@ -50,6 +50,11 @@ class MyFeedback(PythonFeedback):
     merged_weight = torch.concat([self.up_proj.weight, self.gate_proj.weight], dim=0)
     self.register_buffer("merged_weight", merged_weight, persistent=False)
 
+  def load_state(self, loader: ParameterLoader):
+    super().load_state(loader)
+    merged_weight = torch.concat([self.up_proj.weight, self.gate_proj.weight], dim=0)
+    self.merged_weight = merged_weight
+
   def forward(self, x, residual=None):
     if x.is_cuda:
       from qwen3_from_scratch.kernels.triton.feedback import simple_swiglu
