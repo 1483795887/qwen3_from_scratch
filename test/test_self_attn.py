@@ -51,10 +51,10 @@ def test_self_attn_shape_correct_with_kv_cache(
     context = ModelContext()
     context.position_ids = torch.arange(100, 101).view(1, -1).to(device)
     cache_k = torch.randn(
-        2, model_config.num_key_value_heads, 100, model_config.head_dim
+        2, 100, model_config.num_key_value_heads, model_config.head_dim
     ).to(device)
     cache_v = torch.randn(
-        2, model_config.num_key_value_heads, 100, model_config.head_dim
+        2, 100, model_config.num_key_value_heads, model_config.head_dim
     ).to(device)
     context.kv_cache.update(cache_k, cache_v, 3)
     context.use_cache = True
@@ -112,17 +112,19 @@ def test_self_attn_output_close_to_transformers_with_kv_cache(
     context = ModelContext()
     context.position_ids = torch.arange(100, 101).view(1, -1).to(device)
     cache_k = torch.randn(
-        2, model_config.num_key_value_heads, 100, model_config.head_dim
+        2, 100, model_config.num_key_value_heads, model_config.head_dim
     ).to(device)
     cache_v = torch.randn(
-        2, model_config.num_key_value_heads, 100, model_config.head_dim
+        2, 100, model_config.num_key_value_heads, model_config.head_dim
     ).to(device)
     context.kv_cache = PreAllocatedKVCache(1024, 3)
     context.kv_cache.update(cache_k, cache_v, 3)
     context.use_cache = True
     context.cache_position = 100
 
-    past_key_values.update(cache_k, cache_v, 3)
+    past_key_values.update(
+        cache_k.transpose(1, 2), cache_v.transpose(1, 2), 3
+    )
 
     with torch.no_grad():
         torch.manual_seed(42)
