@@ -87,7 +87,7 @@ def fused_attention_intr(
     if STAGE == 1:
         lo, hi = 0, min(start_m * BLOCK_SIZE_M, N_KEY)
     elif STAGE == 2:
-        lo, hi = min(start_m * BLOCK_SIZE_M, N_KEY), min((start_m + 1) * BLOCK_SIZE_M, N_QUERY)
+        lo, hi = min(start_m * BLOCK_SIZE_M, N_KEY), min((start_m + 1) * BLOCK_SIZE_M, N_KEY)
     else:
         lo, hi = 0, N_KEY
     for k in tl.range(lo, hi, BLOCK_SIZE_N, warp_specialize=True):
@@ -107,6 +107,7 @@ def fused_attention_intr(
             attn = tl.dot(data_q, data_k.T, input_precision="ieee") * scale
         else:
             attn = tl.dot(data_q, data_k.T) * scale
+        attn = tl.where(offsets_n[None, :] < N_KEY, attn, -float("inf"))
         if STAGE == 2:
             attn = tl.where(offsets_m[:, None] >= offsets_n[None, :], attn, -float("inf"))
         tmp_max = tl.max(attn, axis=-1, keep_dims=True)
