@@ -36,10 +36,11 @@ def gemm_kernel_core(
   acc,
   BLOCK_SIZE_K, K
 ):
+  w_dtype = b_ptr.dtype.element_ty
   for k in tl.range(0, K, BLOCK_SIZE_K):
     block_a = tl.load(a_ptr, boundary_check=(0, 1))
     block_b = tl.load(b_ptr, boundary_check=(0,1))
-    acc = tl.dot(block_a, block_b, acc)
+    acc = tl.dot(block_a.to(w_dtype), block_b, acc)
     a_ptr = a_ptr.advance([0, BLOCK_SIZE_K])
     b_ptr = b_ptr.advance([BLOCK_SIZE_K, 0])
   return acc
@@ -106,7 +107,8 @@ def gemm_kernel(
     else:
       # beta为0也不能解决nan*0=nan这个问题
       acc = alpha * acc
-    # 暂且不管激活值
+    if activation_fc == ACTIVATION_SILU:
+      acc = acc * tl.sigmod(acc)
     tl.store(d_ptr, acc.to(dtype), boundary_check=(0, 1))
 
 
@@ -144,7 +146,7 @@ def gemm(
     
     BLOCK_SIZE_M = 128 if M > 1 else 1
     BLOCK_SIZE_N = 128
-    BLOCK_SIZE_D = 32
+    BLOCK_SIZE_D = 32 if b.dtype == torch.float32 else 64
     
     grid = (triton.cdiv(M, BLOCK_SIZE_M), triton.cdiv(N, BLOCK_SIZE_N),  B * Ha)
     gemm_kernel[grid](
@@ -169,6 +171,31 @@ def gemm_without_c(
   return gemm(a,b,d,d, is_c_needed=False, alpha=alpha,beta=0.0,activation=activation)
 
 
+def linear(
+  x: torch.Tensor,
+  w: torch.Tensor,
+  output: torch.Tensor,
+  bias: Optional[torch.Tensor] = None,
+  activation_fc: ActivationType = ActivationType.Nop
+):
+  assert len(w.shape) == 2
+  D1, D = w.shape
+  assert D == x.shape[-1], f"x feature dim mismatch: expected {D}, got {x.shape[-1]}"
+  # 普通的Linear不管分组，只要求dim-1连续，所以直接把所有全部打包到M维度
+  assert x.stride(-1) == 1
+  assert output.shape[-1] == D1
+  M = x.numel() // D
+  assert output.numel() // D1 == M
+  x = x.view(1, 1, M, D)
+  w = w.view(1, 1, D1, D)
+  output = output.view(1, 1, M, D1)
+  if bias is not None:
+    assert bias.shape == (D1,)
+    bias = bias.view(1, 1, 1, D1).expand(1, 1, M, D1)
+    gemm(x, w.transpose(-1, -2), bias, output, True, activation=activation_fc)
+  else:
+    gemm(x, w.transpose(-1, -2), output, output, False, beta=0.0, activation=activation_fc)
+  
 
 
 @triton.jit
