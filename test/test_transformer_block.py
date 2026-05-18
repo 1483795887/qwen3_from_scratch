@@ -12,7 +12,7 @@ from qwen3_from_scratch.models.attn import create_causal_attention_mask
 from qwen3_from_scratch.models.parameter_loader import ParameterLoader
 
 
-@pytest.mark.parametrize("component_type", ["base"])
+@pytest.mark.parametrize("component_type", ["base", "my_op"])
 def test_transformer_block_shape_correct(
     model_config, model_path, component_type, device
 ):
@@ -37,7 +37,7 @@ def test_transformer_block_shape_correct(
         assert output.shape == x.shape
 
 
-@pytest.mark.parametrize("component_type", ["base"])
+@pytest.mark.parametrize("component_type", ["base", "my_op"])
 def test_transformer_block_output_close_to_transformers(
     model_config, model_path, component_type, device
 ):

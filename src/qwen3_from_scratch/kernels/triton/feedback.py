@@ -1,3 +1,5 @@
+from typing import Optional
+
 import torch
 import triton
 import triton.language as tl
@@ -143,7 +145,8 @@ def simple_swiglu(
   x: torch.Tensor,
   merged_weight: torch.Tensor,
   down_proj_weight: torch.Tensor,
-  output: torch.Tensor
+  output: torch.Tensor,
+  residual: Optional[torch.Tensor] = None
 ):
   B, N, D = x.shape
   D1, _ = merged_weight.shape
@@ -165,7 +168,7 @@ def simple_swiglu(
   grid = [triton.cdiv(split_D, BLOCK_SIZE_D), B*N]
   swiglu_gate[grid](up_embed, gate_embed, B*N, split_D, BLOCK_SIZE_D)
 
-  linear(up_embed, down_proj_weight, output)
+  linear(up_embed, down_proj_weight, output, bias=residual)
 
 
 class StandardSwiglu(torch.nn.Module):

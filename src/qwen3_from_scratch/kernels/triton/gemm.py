@@ -190,8 +190,10 @@ def linear(
   w = w.view(1, 1, D1, D)
   output = output.view(1, 1, M, D1)
   if bias is not None:
-    assert bias.shape == (D1,)
-    bias = bias.view(1, 1, 1, D1).expand(1, 1, M, D1)
+    if bias.shape == (D1,):
+      bias = bias.view(1, 1, 1, D1).expand(1, 1, M, D1)
+    else:
+      bias = bias.reshape(1, 1, M, D1)
     gemm(x, w.transpose(-1, -2), bias, output, True, activation=activation_fc)
   else:
     gemm(x, w.transpose(-1, -2), output, output, False, beta=0.0, activation=activation_fc)

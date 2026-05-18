@@ -24,10 +24,13 @@ class PythonFeedback(nn.Module):
         self.activation = activation_map[config.hidden_act]()
         self.name = name
 
-    def forward(self, x):
+    def forward(self, x, residual=None):
         embed_up = self.up_proj(x)
         embed_gate = self.activation(self.gate_proj(x))
-        return self.down_proj(embed_up * embed_gate)
+        o = self.down_proj(embed_up * embed_gate)
+        if residual is not None:
+            o = o + residual
+        return o
 
     def load_state(self, loader: ParameterLoader):
         self.down_proj.weight = assign(
@@ -47,10 +50,10 @@ class MyFeedback(PythonFeedback):
     merged_weight = torch.concat([self.up_proj.weight, self.gate_proj.weight], dim=0)
     self.register_buffer("merged_weight", merged_weight, persistent=False)
 
-  def forward(self, x):
+  def forward(self, x, residual=None):
     if x.is_cuda:
       from qwen3_from_scratch.kernels.triton.feedback import simple_swiglu
       output = torch.empty_like(x)
-      simple_swiglu(x, self.merged_weight, self.down_proj.weight, output)
+      simple_swiglu(x, self.merged_weight, self.down_proj.weight, output, residual=residual)
       return output
-    return super().forward(x)
+    return super().forward(x, residual=residual)
