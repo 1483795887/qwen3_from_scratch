@@ -5,7 +5,6 @@ import os
 import math
 from qwen3_from_scratch.kernels.triton.gemm import gemm, gemm_without_c
 
-_TRITON_IEEE_PRECISION = os.environ.get("TRITON_IEEE_PRECISION", "0") == "1"
 @triton.jit
 def softmax(
     A, head_stride, row_stride, col_stride, M, N, is_causal, BLOCK_SIZE: tl.constexpr
@@ -81,7 +80,6 @@ def fused_attention_intr(
     STAGE: tl.constexpr,
     BLOCK_SIZE_M: tl.constexpr,
     BLOCK_SIZE_N: tl.constexpr,
-    USE_FP32_ACCUM: tl.constexpr,
     dtype: tl.constexpr
 ):
     if STAGE == 1:
@@ -103,10 +101,7 @@ def fused_attention_intr(
             mask=kv_mask,
             other=0.0,
         )
-        if USE_FP32_ACCUM:
-            attn = tl.dot(data_q, data_k.T, input_precision="ieee") * scale
-        else:
-            attn = tl.dot(data_q, data_k.T) * scale
+        attn = tl.dot(data_q, data_k.T) * scale
         attn = tl.where(offsets_n[None, :] < N_KEY, attn, -float("inf"))
         if STAGE == 2:
             attn = tl.where(offsets_m[:, None] >= offsets_n[None, :], attn, -float("inf"))
@@ -119,10 +114,7 @@ def fused_attention_intr(
         dominator = dominator * scale_factor + tl.sum(exp_attn, axis=-1, keep_dims=True)
         max_val = new_max_val
         exp_attn = exp_attn.to(dtype)
-        if USE_FP32_ACCUM:
-            result_o = result_o * scale_factor + tl.dot(exp_attn, data_v, input_precision="ieee")
-        else:
-            result_o = result_o * scale_factor + tl.dot(exp_attn, data_v)
+        result_o = result_o * scale_factor + tl.dot(exp_attn, data_v)
 
         offsets_n += BLOCK_SIZE_N
     return result_o, max_val, dominator, offsets_n
@@ -137,7 +129,6 @@ def fused_attention(
     BLOCK_SIZE_M: tl.constexpr,
     BLOCK_SIZE_N: tl.constexpr,
     BLOCK_SIZE_DIM: tl.constexpr,
-    USE_FP32_ACCUM: tl.constexpr,
     dtype: tl.constexpr,
 ):
     b_id = tl.program_id(2)
@@ -183,7 +174,6 @@ def fused_attention(
             1,
             BLOCK_SIZE_M,
             BLOCK_SIZE_N,
-            USE_FP32_ACCUM,
             dtype,
         )
         result_o, max_val, dominator, offsets_n = fused_attention_intr(
@@ -199,7 +189,6 @@ def fused_attention(
             2,
             BLOCK_SIZE_M,
             BLOCK_SIZE_N,
-            USE_FP32_ACCUM,
             dtype,
         )
     else:
@@ -216,7 +205,6 @@ def fused_attention(
             3,
             BLOCK_SIZE_M,
             BLOCK_SIZE_N,
-            USE_FP32_ACCUM,
             dtype,
         )
     result_o = (result_o / dominator).to(dtype)
@@ -252,7 +240,6 @@ def flash_attention(Q: torch.Tensor, K: torch.Tensor, V: torch.Tensor, is_causal
         is_causal and M > 1,
         groups,
         BLOCK_SIZE_M, BLOCK_SIZE_N, BLOCK_SIZE_K,
-        _TRITON_IEEE_PRECISION,
         dtype,
     )
     return output
