@@ -1,3 +1,6 @@
+from collections import OrderedDict
+from typing import Optional
+
 import torch
 from torch import nn
 
@@ -110,7 +113,7 @@ class FusedSelfAttention(nn.Module):
         emb = torch.cat([freqs, freqs], dim=-1)
         return PositionEmbeddings(emb.cos().to(dtype), emb.sin().to(dtype))
 
-    def _forward_pytorch(self, x, context):
+    def _forward_pytorch(self, x, context, residual=None):
         B, S, _ = x.shape
         H_q = self.num_heads
         H_kv = self.num_kv_heads
@@ -169,11 +172,14 @@ class FusedSelfAttention(nn.Module):
         o = torch.matmul(attn, v_exp)
 
         o = o.transpose(1, 2).reshape(B, S, -1)
-        return torch.nn.functional.linear(o, self.o_proj.weight)
+        o = torch.nn.functional.linear(o, self.o_proj.weight)
+        if residual is not None:
+            o = o + residual
+        return o
 
-    def forward(self, x: torch.Tensor, context: ModelContext):
+    def forward(self, x: torch.Tensor, context: ModelContext, residual: Optional[torch.Tensor] = None):
         if x.device.type == "cpu":
-            return self._forward_pytorch(x, context)
+            return self._forward_pytorch(x, context, residual)
 
         B, S, _ = x.shape
         H_q = self.num_heads
@@ -241,23 +247,25 @@ class FusedSelfAttention(nn.Module):
 
         o = o.transpose(1, 2).reshape(B, S, -1)
         output = torch.empty(B, S, self.config.hidden_size, dtype=x.dtype, device=x.device)
-        linear(o, self.o_proj.weight, output)
+        linear(o, self.o_proj.weight, output, bias=residual)
         return output
 
-    def state_dict(self, *args, **kwargs):
+    def state_dict(self, destination=None, prefix='', keep_vars=False):
+        if destination is None:
+            destination = OrderedDict()
         head_dim = self.head_dim
         q_end = self.num_heads * head_dim
         q_w, k_w, v_w = self.qkv_proj.weight.split(
             [q_end, self.num_kv_heads * head_dim, self.num_kv_heads * head_dim], dim=0
         )
-        return {
-            "q_proj.weight": q_w,
-            "k_proj.weight": k_w,
-            "v_proj.weight": v_w,
-            "o_proj.weight": self.o_proj.weight,
-            "q_norm.weight": self.q_norm_weight,
-            "k_norm.weight": self.k_norm_weight,
-        }
+        dst = lambda v: v if keep_vars else v.detach()
+        destination[prefix + 'q_proj.weight'] = dst(q_w)
+        destination[prefix + 'k_proj.weight'] = dst(k_w)
+        destination[prefix + 'v_proj.weight'] = dst(v_w)
+        destination[prefix + 'o_proj.weight'] = dst(self.o_proj.weight)
+        destination[prefix + 'q_norm.weight'] = dst(self.q_norm_weight)
+        destination[prefix + 'k_norm.weight'] = dst(self.k_norm_weight)
+        return destination
 
     def load_state(self, loader: ParameterLoader):
         q_w = loader.get(f"{self.name}.q_proj.weight")
