@@ -6,7 +6,7 @@ from qwen3_from_scratch.factory import ComponentFactory
 from qwen3_from_scratch.models.parameter_loader import ParameterLoader
 
 
-@pytest.mark.parametrize("component_type", ["base"])
+@pytest.mark.parametrize("component_type", ["base", "my_op"])
 def test_ffn_load(model_path, model_config, component_type, device):
     loader = ParameterLoader()
     loader.load(model_path)
@@ -23,7 +23,7 @@ def test_ffn_load(model_path, model_config, component_type, device):
         assert x.shape == y.shape
 
 
-@pytest.mark.parametrize("component_type", ["base"])
+@pytest.mark.parametrize("component_type", ["base", "my_op"])
 def test_ffn_compare_with_transformers(
     model_config, qwen3_config, component_type, device
 ):

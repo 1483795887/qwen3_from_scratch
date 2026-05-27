@@ -1,136 +1,9 @@
-import math
 import triton
 import triton.language as tl
 import torch
 import os
-import triton.compiler as tc
-
-_TRITON_IEEE_PRECISION = os.environ.get("TRITON_IEEE_PRECISION", "0") == "1"
-
-@triton.jit
-def matrix_multiplication_kernel(
-    a,
-    b,
-    c,
-    M,
-    N,
-    K,
-    stride_ah,
-    stride_am,
-    stride_ak,
-    stride_bh,
-    stride_bk,
-    stride_bn,
-    stride_ch,
-    stride_cm,
-    stride_cn,
-    scale,
-    groups: tl.constexpr,
-    BLOCK_SIZE_M: tl.constexpr,
-    BLOCK_SIZE_N: tl.constexpr,
-    BLOCK_SIZE_K: tl.constexpr,
-    USE_FP32_ACCUM: tl.constexpr,
-    a_dtype: tl.constexpr,
-):
-    pid_h = tl.program_id(2)
-    pid_m = tl.program_id(0)
-    pid_n = tl.program_id(1)
-    pid_b_h = pid_h // groups
-
-    a_ptr = a + pid_h * stride_ah
-    b_ptr = b + pid_b_h * stride_bh
-    c_ptr = c + pid_h * stride_ch
-
-    offsets_m = pid_m * BLOCK_SIZE_M + tl.arange(0, BLOCK_SIZE_M)
-    offsets_n = pid_n * BLOCK_SIZE_N + tl.arange(0, BLOCK_SIZE_N)
-    mask_m = offsets_m[:, None] < M
-    mask_n = offsets_n[None, :] < N
-    offsets_k = tl.arange(0, BLOCK_SIZE_K)
-
-    a_ptrs = (
-        a_ptr + offsets_m[:, None] * stride_am + offsets_k[None, :] * stride_ak
-    )
-    b_ptrs = (
-        b_ptr + offsets_n[None, :] * stride_bn + offsets_k[:, None] * stride_bk
-    )
-    acc = tl.zeros((BLOCK_SIZE_M, BLOCK_SIZE_N), dtype=tl.float32)
-    for k in tl.range(0, K, BLOCK_SIZE_K):
-        block_a = tl.load(a_ptrs, (offsets_k[None, :] < K - k) & mask_m, 0.0).to(a_dtype)
-        block_b = tl.load(b_ptrs, (offsets_k[:, None] < K - k) & mask_n, 0.0).to(a_dtype)
-        if USE_FP32_ACCUM:
-            acc = tl.dot(block_a, block_b, acc, input_precision="ieee")
-        else:
-            acc = tl.dot(block_a, block_b, acc)
-        a_ptrs += BLOCK_SIZE_K * stride_ak
-        b_ptrs += BLOCK_SIZE_K * stride_bk
-    tl.store(
-        c_ptr
-        + offsets_m[:, None] * stride_cm
-        + offsets_n[None, :] * stride_cn,
-        (acc * scale).to(a_dtype),
-        mask_m & mask_n,
-    )
-
-
-# MxK, NxK=>MxN
-@triton.jit
-def matrix_multiplication_kernel_with_transpose(
-    a,
-    b,
-    c,
-    M,
-    N,
-    K,
-    stride_ah,
-    stride_am,
-    stride_ak,
-    stride_bh,
-    stride_bn,
-    stride_bk,
-    stride_ch,
-    stride_cm,
-    stride_cn,
-    scale,
-    groups: tl.constexpr,
-    BLOCK_SIZE_M: tl.constexpr,
-    BLOCK_SIZE_N: tl.constexpr,
-    BLOCK_SIZE_K: tl.constexpr,
-    USE_FP32_ACCUM: tl.constexpr,
-    a_dtype: tl.constexpr,
-):
-    pid_m = tl.program_id(0)
-    pid_n = tl.program_id(1)
-    pid_h = tl.program_id(2)
-    pid_b_h = pid_h // groups
-    a_ptr = a + pid_h * stride_ah
-    b_ptr = b + pid_b_h * stride_bh
-    c_ptr = c + pid_h * stride_ch
-
-    offsets_m = (pid_m * BLOCK_SIZE_M + tl.arange(0, BLOCK_SIZE_M))[:, None]
-    ori_offsets_n = pid_n * BLOCK_SIZE_N + tl.arange(0, BLOCK_SIZE_N)
-    offsets_n = ori_offsets_n[:, None]
-    mask_m = offsets_m < M
-    mask_n = offsets_n < N
-    offsets_k = tl.arange(0, BLOCK_SIZE_K)
-
-    a_ptrs = a_ptr + offsets_m * stride_am + offsets_k[None, :] * stride_ak
-    b_ptrs = b_ptr + offsets_n * stride_bn + offsets_k[None, :] * stride_bk
-    acc = tl.zeros((BLOCK_SIZE_M, BLOCK_SIZE_N), dtype=tl.float32)
-    for k in tl.range(0, K, BLOCK_SIZE_K):
-        block_a = tl.load(a_ptrs, (offsets_k[None, :] < K - k) & mask_m, 0.0).to(a_dtype)
-        block_b = tl.load(b_ptrs, (offsets_k[None, :] < K - k) & mask_n, 0.0).to(a_dtype)
-        if USE_FP32_ACCUM:
-            acc = tl.dot(block_a, block_b.T, acc, input_precision="ieee")
-        else:
-            acc = tl.dot(block_a, block_b.T, acc)
-        a_ptrs += BLOCK_SIZE_K * stride_ak
-        b_ptrs += BLOCK_SIZE_K * stride_bk
-    tl.store(
-        c_ptr + offsets_m * stride_cm + ori_offsets_n[None, :] * stride_cn,
-        (acc * scale).to(a_dtype),
-        mask_m & (ori_offsets_n[None, :] < N),
-    )
-
+import math
+from qwen3_from_scratch.kernels.triton.gemm import gemm, gemm_without_c
 
 @triton.jit
 def softmax(
@@ -153,10 +26,7 @@ def softmax(
         row = row / sum_val
         tl.store(input_ptr, row, mask=mask)
 
-
-def scaled_dot_production(
-    Q: torch.Tensor, K: torch.Tensor, V: torch.Tensor, is_causal: bool = True
-):
+def sdpa_shape_assert(Q: torch.Tensor, K: torch.Tensor, V: torch.Tensor):
     assert len(Q.shape) == 4
     assert len(K.shape) == 4
     assert len(V.shape) == 4
@@ -166,207 +36,190 @@ def scaled_dot_production(
     B, Hq, M, D = Q.shape
     _, Hk, N, _ = K.shape
     assert Hq % Hk == 0
+    assert Q.stride(1) == D, f"Q stride mismatch: {Q.stride(1)} vs {D}"
+    assert K.stride(1) == D, f"K stride mismatch: {K.stride(1)} vs {D}"
+    assert V.stride(1) == D, f"V stride mismatch: {V.stride(1)} vs {D}"
+
+
+def scaled_dot_production(
+    Q: torch.Tensor, K: torch.Tensor, V: torch.Tensor, is_causal: bool = True
+):
+    sdpa_shape_assert(Q, K, V)
+
+    B, Hq, M, D = Q.shape
+    _, Hk, N, _ = K.shape
+    assert Hq % Hk == 0
     groups = Hq // Hk
 
-    scale = 1.0 / (D**0.5)
+    scale = 1.0 / (D**0.5)* math.log2(math.e)
 
-    BLOCK_SIZE_M = 128
-    BLOCK_SIZE_N = 128
-    BLOCK_SIZE_D = 32
     attn = torch.empty((B, Hq, M, N), dtype=Q.dtype, device=Q.device)
-    grid = (triton.cdiv(M, BLOCK_SIZE_M), triton.cdiv(N, BLOCK_SIZE_N), B * Hq)
-    dtype = tl.float32 if Q.dtype == torch.float32 else (tl.float16 if Q.dtype == torch.float16 else tl.bfloat16)
-    matrix_multiplication_kernel_with_transpose[grid](
-        Q,
-        K,
-        attn,
-        M,
-        N,
-        D,
-        Q.stride(1),
-        Q.stride(2),
-        Q.stride(3),
-        K.stride(1),
-        K.stride(2),
-        K.stride(3),
-        attn.stride(1),
-        attn.stride(2),
-        attn.stride(3),
-        scale,
-        groups,
-        BLOCK_SIZE_M,
-        BLOCK_SIZE_N,
-        BLOCK_SIZE_D,
-        _TRITON_IEEE_PRECISION,
-        dtype,
-    )
+    gemm_without_c(Q, K.transpose(-1,-2), attn, alpha=scale)
 
     BLOCK_SIZE = triton.next_power_of_2(N)
     ROW_PER_BLOCK = 32
     grid = (triton.cdiv(M, ROW_PER_BLOCK), B * Hq)
     softmax[grid](
-        attn, attn.stride(1), attn.stride(2), attn.stride(3), M, N, is_causal, BLOCK_SIZE
+        attn, attn.stride(1), attn.stride(2), attn.stride(3), M, N, is_causal and M > 1, BLOCK_SIZE
     )
-
-    grid = (triton.cdiv(M, BLOCK_SIZE_M), triton.cdiv(D, BLOCK_SIZE_N), B * Hq)
     output = torch.empty_like(Q)
-    matrix_multiplication_kernel[grid](
-        attn,
-        V,
-        output,
-        M,
-        D,
-        N,
-        attn.stride(1),
-        attn.stride(2),
-        attn.stride(3),
-        V.stride(1),
-        V.stride(2),
-        V.stride(3),
-        output.stride(1),
-        output.stride(2),
-        output.stride(3),
-        1.0,
-        groups,
-        BLOCK_SIZE_M,
-        BLOCK_SIZE_N,
-        BLOCK_SIZE_D,
-        _TRITON_IEEE_PRECISION,
-        dtype,
-    )
+    gemm_without_c(attn, V, output,alpha= 1.0)
     return output
 
-"""
-STAGE: 1, 0到 start_m *BLOCK_SIZE_N 的 不用上遮罩
-STAGE: 2, start_m *BLOCK_SIZE_N 到 (start_m+1) *BLOCK_SIZE_N 的
-STAGE: 3, 0 到 N 不上遮罩，非因果情况
-"""
 @triton.jit
-def fused_attention_kv_iter(
-    result_o,
+def fused_attention_intr(
     data_q,
-    max_val,
-    dominator,
-    STAGE:tl.constexpr,
-    i_m,
-    offsets_m:tl.constexpr,
-    offsets_n:tl.constexpr,
-    N,
-    desc_k, desc_v,
-    BLOCK_SIZE_M:tl.constexpr,
-    BLOCK_SIZE_N:tl.constexpr,
-    dtype:tl.constexpr,
-    USE_FP32_ACCUM:tl.constexpr,
+    K_ptr, V_ptr,
+    result_o, max_val, dominator,
+    N_QUERY, N_KEY, STRIDE_N_KV: tl.constexpr,
+    start_m,
+    scale,
+    mask_d,
+    offsets_d, offsets_n,
+    offsets_m,
+    STAGE: tl.constexpr,
+    BLOCK_SIZE_M: tl.constexpr,
+    BLOCK_SIZE_N: tl.constexpr,
+    dtype: tl.constexpr
 ):
     if STAGE == 1:
-        lo, hi = 0, i_m * BLOCK_SIZE_M
+        lo, hi = 0, min(start_m * BLOCK_SIZE_M, N_KEY)
     elif STAGE == 2:
-        lo, hi = i_m * BLOCK_SIZE_M, (i_m + 1) * BLOCK_SIZE_M
+        lo, hi = min(start_m * BLOCK_SIZE_M, N_KEY), min((start_m + 1) * BLOCK_SIZE_M, N_KEY)
     else:
-        lo, hi = 0, N
+        lo, hi = 0, N_KEY
     for k in tl.range(lo, hi, BLOCK_SIZE_N, warp_specialize=True):
-        start_n = tl.multiple_of(k, BLOCK_SIZE_N)
-        data_k = desc_k.load([start_n, 0]).T
-        data_v = desc_v.load([start_n, 0])
-        if USE_FP32_ACCUM:
-            attn = tl.dot(data_q, data_k, input_precision="ieee")
-        else:
-            attn = tl.dot(data_q, data_k)
+        k = tl.multiple_of(k, BLOCK_SIZE_N)
+        kv_mask = mask_d & (offsets_n[:, None] < N_KEY)
+        data_k = tl.load(
+            K_ptr + offsets_n[:, None] * STRIDE_N_KV + offsets_d[None, :],
+            mask=kv_mask,
+            other=0.0,
+        )
+        data_v = tl.load(
+            V_ptr + offsets_n[:, None] * STRIDE_N_KV + offsets_d[None, :],
+            mask=kv_mask,
+            other=0.0,
+        )
+        attn = tl.dot(data_q, data_k.T) * scale
+        attn = tl.where(offsets_n[None, :] < N_KEY, attn, -float("inf"))
         if STAGE == 2:
-            causal_mask = offsets_m[:, None] >= (start_n + offsets_n)[None, :]
-            attn = attn + tl.where(causal_mask, 0, -float("inf"))
-        new_max_val = tl.maximum(max_val, tl.max(attn, axis=-1, keep_dims=True))
-        exp_attn = tl.math.exp2(attn - new_max_val)
+            attn = tl.where(offsets_m[:, None] >= offsets_n[None, :], attn, -float("inf"))
+        tmp_max = tl.max(attn, axis=-1, keep_dims=True)
+        new_max_val = tl.maximum(max_val, tmp_max)
+        attn = attn - new_max_val
+        exp_attn = tl.math.exp2(attn)
 
         scale_factor = tl.math.exp2(max_val - new_max_val)
-        curr_dominator = tl.sum(exp_attn, axis=-1, keep_dims=True)
-        dominator = dominator * scale_factor + curr_dominator
+        dominator = dominator * scale_factor + tl.sum(exp_attn, axis=-1, keep_dims=True)
         max_val = new_max_val
-        result_o *= scale_factor
         exp_attn = exp_attn.to(dtype)
-        if USE_FP32_ACCUM:
-            result_o = tl.dot(exp_attn, data_v, input_precision="ieee", acc=result_o)
-        else:
-            result_o = tl.dot(exp_attn, data_v, acc=result_o)
+        result_o = result_o * scale_factor + tl.dot(exp_attn, data_v)
 
-    return result_o, max_val, dominator
+        offsets_n += BLOCK_SIZE_N
+    return result_o, max_val, dominator, offsets_n
 
 @triton.jit
 def fused_attention(
-    Q,
-    K,
-    V,
-    output,
-    M,
-    N,
-    HEAD_DIM: tl.constexpr,
+    Q, K, V, output,
+    N_QUERY, N_KEY, HEAD_QUERY:tl.constexpr, HEAD_DIM: tl.constexpr,
     scale,
-    stride_h,
     is_causal: tl.constexpr,
     groups: tl.constexpr,
     BLOCK_SIZE_M: tl.constexpr,
     BLOCK_SIZE_N: tl.constexpr,
-    BLOCK_SIZE_K: tl.constexpr,
-    USE_FP32_ACCUM: tl.constexpr,
+    BLOCK_SIZE_DIM: tl.constexpr,
     dtype: tl.constexpr,
 ):
-    pid_qh = tl.program_id(1)  # BxH ，放到一个编号中
-    pid_kh = (pid_qh) // groups  # KV 的编号向下整除 组数，不用分离 B和H，自然和Q在同一个B中
-    start_m = tl.program_id(0)
-    result_o = tl.zeros((BLOCK_SIZE_M, BLOCK_SIZE_K), dtype=tl.float32)
-    desc_q = tl.make_tensor_descriptor(
-        Q + pid_qh * stride_h,
-        (M, HEAD_DIM),
-        (HEAD_DIM, 1),
-        (BLOCK_SIZE_M, BLOCK_SIZE_K)
-    )
-    desc_k = tl.make_tensor_descriptor(
-        K + pid_kh * stride_h,
-        (N, HEAD_DIM),
-        (HEAD_DIM, 1),
-        (BLOCK_SIZE_N, BLOCK_SIZE_K)
-    )
-    desc_v = tl.make_tensor_descriptor(
-        V + pid_kh * stride_h,
-        (N, HEAD_DIM),
-        (HEAD_DIM, 1),
-        (BLOCK_SIZE_N, BLOCK_SIZE_K)
-    )
-    desc_o = tl.make_tensor_descriptor(
-        output + pid_qh * stride_h,
-        (M, HEAD_DIM),
-        (HEAD_DIM, 1),
-        (BLOCK_SIZE_M, BLOCK_SIZE_K)
-    )
+    b_id = tl.program_id(2)
+    h_id = tl.program_id(1)
+    h_id_kv = h_id // groups
+    n_q_id = tl.program_id(0)
+    result_o = tl.zeros((BLOCK_SIZE_M, BLOCK_SIZE_DIM), dtype=tl.float32)
+    offsets_qm = n_q_id * BLOCK_SIZE_M + tl.arange(0, BLOCK_SIZE_M)
+    offsets_qd = tl.arange(0, BLOCK_SIZE_DIM)
 
-    offsets_m = start_m* BLOCK_SIZE_M + tl.arange(0, BLOCK_SIZE_M)
+    STRIDE_N_QO = HEAD_DIM * HEAD_QUERY
+    STRIDE_N_KV = STRIDE_N_QO // groups
+    STRIDE_B_QO = N_QUERY * STRIDE_N_QO
+    STRIDE_B_KV = N_KEY * STRIDE_N_KV
+
+    Q_ptr = Q + b_id * STRIDE_B_QO + h_id * HEAD_DIM
+    K_ptr = K + b_id * STRIDE_B_KV + h_id_kv * HEAD_DIM
+    V_ptr = V + b_id * STRIDE_B_KV + h_id_kv * HEAD_DIM
+    O_ptr = output + b_id * STRIDE_B_QO + h_id * HEAD_DIM
+
+    mask_m = offsets_qm[:, None] < N_QUERY
+    mask_d = offsets_qd < HEAD_DIM
+
+    data_q = tl.load(
+        Q_ptr + offsets_qm[:, None] * STRIDE_N_QO + offsets_qd[None, :],
+        mask=mask_m & mask_d,
+        other=0.0,
+    )
     offsets_n = tl.arange(0, BLOCK_SIZE_N)
-    data_q = (desc_q.load([start_m * BLOCK_SIZE_M, 0])*scale).to(dtype)
-
     max_val = tl.zeros((BLOCK_SIZE_M, 1), dtype=tl.float32) - float("inf")
     dominator = tl.zeros((BLOCK_SIZE_M, 1), dtype=tl.float32)
     if is_causal:
-        result_o, max_val, dominator = fused_attention_kv_iter(
-            result_o, data_q, max_val, dominator, 1, start_m, offsets_m, offsets_n, N, desc_k, desc_v, BLOCK_SIZE_M, BLOCK_SIZE_N, dtype, USE_FP32_ACCUM)
-        result_o, max_val, dominator = fused_attention_kv_iter(
-            result_o, data_q, max_val, dominator, 2, start_m, offsets_m, offsets_n, N, desc_k, desc_v, BLOCK_SIZE_M, BLOCK_SIZE_N, dtype, USE_FP32_ACCUM)
+        result_o, max_val, dominator, offsets_n = fused_attention_intr(
+            data_q, 
+            K_ptr, V_ptr,
+            result_o, max_val, dominator, 
+            N_QUERY, N_KEY, STRIDE_N_KV,
+            n_q_id,
+            scale,
+            mask_d,
+            offsets_qd, offsets_n,
+            offsets_qm,
+            1,
+            BLOCK_SIZE_M,
+            BLOCK_SIZE_N,
+            dtype,
+        )
+        result_o, max_val, dominator, offsets_n = fused_attention_intr(
+            data_q, 
+            K_ptr, V_ptr,
+            result_o, max_val, dominator,
+            N_QUERY, N_KEY, STRIDE_N_KV,
+            n_q_id,
+            scale,
+            mask_d,
+            offsets_qd, offsets_n,
+            offsets_qm,
+            2,
+            BLOCK_SIZE_M,
+            BLOCK_SIZE_N,
+            dtype,
+        )
     else:
-        result_o, max_val, dominator = fused_attention_kv_iter(
-            result_o, data_q, max_val, dominator, 3, start_m, offsets_m, offsets_n, N, desc_k, desc_v, BLOCK_SIZE_M, BLOCK_SIZE_N, dtype, USE_FP32_ACCUM)
-    result_o = result_o / dominator
-    desc_o.store([start_m * BLOCK_SIZE_M, 0], result_o)
+        result_o, max_val, dominator, offsets_n = fused_attention_intr(
+            data_q, 
+            K_ptr, V_ptr,
+            result_o, max_val, dominator,
+            N_QUERY, N_KEY, STRIDE_N_KV,
+            n_q_id,
+            scale,
+            mask_d,
+            offsets_qd, offsets_n,
+            offsets_qm,
+            3,
+            BLOCK_SIZE_M,
+            BLOCK_SIZE_N,
+            dtype,
+        )
+    result_o = (result_o / dominator).to(dtype)
 
+    tl.store(
+        O_ptr + offsets_qm[:, None] * STRIDE_N_QO + offsets_qd[None, :],
+        result_o.to(dtype),
+        mask=mask_d & mask_m,
+    )
 
 # Q, K, V, output are tensors on the GPU
 
 
 def flash_attention(Q: torch.Tensor, K: torch.Tensor, V: torch.Tensor, is_causal:bool=True):
-    assert len(Q.shape) == 4
-    assert len(K.shape) == 4
-    assert len(V.shape) == 4
-    assert K.shape == V.shape
-    assert K.shape[-1] == Q.shape[-1]
-
+    sdpa_shape_assert(Q, K, V)
     B, Hq, M, D = Q.shape
     _, Hk, N, _ = K.shape
     assert Hq % Hk == 0
@@ -375,20 +228,18 @@ def flash_attention(Q: torch.Tensor, K: torch.Tensor, V: torch.Tensor, is_causal
     output = torch.empty_like(Q)
 
     scale = 1.0 / (D**0.5) * math.log2(math.e)
-    BLOCK_SIZE_M = 64
-    BLOCK_SIZE_N = 64
+    BLOCK_SIZE_M = 32 if M > 1 else 1
+    BLOCK_SIZE_N = 32
     BLOCK_SIZE_K = triton.next_power_of_2(max(D, 16))
-    grid = (triton.cdiv(M, BLOCK_SIZE_M), Hq * B)
+    grid = (triton.cdiv(M, BLOCK_SIZE_M), Hq , B)
     dtype = tl.float32 if Q.dtype == torch.float32 else (tl.float16 if Q.dtype == torch.float16 else tl.bfloat16)
     fused_attention[grid](
         Q, K, V, output,
-        M, N, D,
+        M, N, Hq, D,
         scale,
-        Q.stride(1),
-        is_causal,
+        is_causal and M > 1,
         groups,
         BLOCK_SIZE_M, BLOCK_SIZE_N, BLOCK_SIZE_K,
-        _TRITON_IEEE_PRECISION,
         dtype,
     )
     return output
@@ -436,20 +287,29 @@ def cpu_forward(q, k, v, head_dim, is_causal: bool = True):
 
 
 def main():
-    for dtype in [torch.float32, torch.float16, torch.bfloat16]:
-        q = torch.arange(0, 12, dtype=dtype, device="cuda").view([1, 1, 3, 4])
-        k = torch.arange(12, 20, dtype=dtype, device="cuda").view([1, 1, 2, 4])
-        v = torch.arange(20, 28, dtype=dtype, device="cuda").view([1, 1, 2, 4])
-        ref_o = cpu_forward(q, k, v, 4)
-        o = flash_attention(q, k, v)
-        print(f"dtype={dtype}, ref_o={ref_o}, o={o}")
-    # for dtype in [torch.float32, torch.float16, torch.bfloat16]:
-    #     q = torch.arange(0, 12, dtype=dtype, device="cuda").view([1, 1, 3, 4])
-    #     k = torch.arange(12, 20, dtype=dtype, device="cuda").view([1, 1, 2, 4])
-    #     v = torch.arange(20, 28, dtype=dtype, device="cuda").view([1, 1, 2, 4])
-    #     ref_o = cpu_forward(q, k, v, 4)
-    #     o = scaled_dot_production(q, k, v)
-    #     print(f"scaled_dot_production dtype={dtype}, ref_o={ref_o}, o={o}")
+  print()
+  for dtype in [
+    torch.float32, 
+    # torch.float16, 
+    # torch.bfloat16
+  ]:
+      M = 1
+      B = 2
+      N = 1023
+      D = 128
+      H = 16
+      groups = 2
+      q = torch.rand(B, M, H, D, dtype=dtype, device='cuda').transpose(1,2)
+      k = torch.rand(B, N, H//groups, D, dtype=dtype, device='cuda').transpose(1,2)
+      v = torch.rand(B, N, H//groups, D, dtype=dtype, device='cuda').transpose(1,2)
+      ref_o = cpu_forward(q, k, v, 4)
+      o = flash_attention(q, k, v)
+      sdpa_o = scaled_dot_production(q,k,v)
+      # print(f"dtype={dtype}, ref_o={ref_o}, o={o}, sdpa={sdpa_o}")
+      diff_fr = (o - ref_o).abs().max()
+      print(diff_fr)
+      diff_sr = (sdpa_o - ref_o).abs().max()
+      print(diff_sr)
 
 
 if __name__ == "__main__":
