@@ -19,9 +19,9 @@ def test_gqa_attn_shape_correct(model_config, component_type, device):
     n_head_kv = model_config.num_key_value_heads
     n_head_dim = model_config.head_dim
 
-    q = torch.rand(n_batch, n_head_q, n_seq, n_head_dim, device=device)
-    k = torch.rand(n_batch, n_head_kv, n_seq, n_head_dim, device=device)
-    v = torch.rand(n_batch, n_head_kv, n_seq, n_head_dim, device=device)
+    q = torch.rand(n_batch,  n_seq,n_head_q, n_head_dim, device=device).transpose(1,2)
+    k = torch.rand(n_batch,  n_seq,n_head_kv, n_head_dim, device=device).transpose(1,2)
+    v = torch.rand(n_batch,  n_seq,n_head_kv, n_head_dim, device=device).transpose(1,2)
     attn = ComponentFactory.create(
         "attn", model_config, component_impl=component_type
     ).to(device)
@@ -55,25 +55,25 @@ def test_gqa_against_transformers(
     with torch.no_grad():
         q = torch.rand(
             n_batch,
-            qwen3_config.num_attention_heads,
             n_seq,
-            head_dim,
+            qwen3_config.num_attention_heads,
+            head_dim ,
             device=device,
-        )
+        ).transpose(1,2)
         k = torch.rand(
             n_batch,
-            qwen3_config.num_key_value_heads,
             n_seq,
-            head_dim,
+            qwen3_config.num_key_value_heads,
+            head_dim ,
             device=device,
-        )
+        ).transpose(1,2)
         v = torch.rand(
             n_batch,
-            qwen3_config.num_key_value_heads,
             n_seq,
-            head_dim,
+            qwen3_config.num_key_value_heads,
+            head_dim ,
             device=device,
-        )
+        ).transpose(1,2)
         attn_output, _ = transformers_attention_interface(
             fake_module,
             q,
@@ -88,7 +88,7 @@ def test_gqa_against_transformers(
         assert torch.allclose(attn_output, new_o, atol=1e-5)
 
 
-@pytest.mark.parametrize("component_type", ["base"])
+@pytest.mark.parametrize("component_type", ["base", "my_op", "my_op_flash"])
 def test_gqa_against_transformers_with_cache(
     model_config, component_type, qwen3_config, device
 ):
@@ -105,14 +105,14 @@ def test_gqa_against_transformers_with_cache(
     head_dim = model_config.head_dim
     with torch.no_grad():
         q = torch.rand(
-            n_batch, model_config.num_attention_heads, 1, head_dim, device=device
-        )
+            n_batch, 1, model_config.num_attention_heads, head_dim, device=device
+        ).transpose(1,2)
         k = torch.rand(
-            n_batch, model_config.num_key_value_heads, n_seq, head_dim, device=device
-        )
+            n_batch, n_seq, model_config.num_key_value_heads, head_dim, device=device
+        ).transpose(1,2)
         v = torch.rand(
-            n_batch, model_config.num_key_value_heads, n_seq, head_dim, device=device
-        )
+            n_batch, n_seq, model_config.num_key_value_heads, head_dim, device=device
+        ).transpose(1,2)
         attn_output, _ = transformers_attention_interface(
             fake_module,
             q,

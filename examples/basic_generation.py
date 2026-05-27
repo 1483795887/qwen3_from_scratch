@@ -22,6 +22,7 @@ def main():
     model_path = os.environ.get("MODEL_PATH")
     loader.load(model_path)
     config = load_from_file(model_path + "/config.json")
+    config.decoder_layer.name = 'my_op'
     model = Qwen3(config=config)
     model.load_state(loader)
     unused_keys = loader.get_unused_keys()
@@ -54,7 +55,7 @@ def main():
                 stream=True,
             )
             for token in result:
-                print(token, end="")
+                print(token, end="", flush=True)
 
 
 if __name__ == "__main__":
