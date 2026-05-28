@@ -29,10 +29,10 @@ class ModelConfig:
     intermediate_size: int = 4096
 
     norm_type: NORM_TYPE = "rms_norm"
-    norm_params: dict = field(default_factory=dict)
+    norm_params: dict = field(default_factory=lambda :{"eps": 1e-5})
 
     pos_embed_type: POS_EMBED_TYPE = "rope"
-    pos_embed_params: dict = field(default_factory=dict)
+    pos_embed_params: dict = field(default_factory=lambda :{"rope_theta": 100000, "rope_type": "neox"})
 
     self_attn: ComponentConfig = field(
         default_factory=lambda: ComponentConfig("base")
