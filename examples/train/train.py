@@ -8,6 +8,9 @@ from dataset import PretrainDataset
 from torch.utils.data import DataLoader
 from tqdm import tqdm
 import argparse
+import time
+import os
+
 
 import logging
 
@@ -55,8 +58,8 @@ def build_model():
     return Qwen3(config=config)
 
 
-def train(data_path: str):
-    model = build_model()
+def train(data_path: str, save_dir: str = './output'):
+    model = build_model().cuda().to(torch.bfloat16)
     info = count_model_params(model)
     print(info)
 
@@ -65,23 +68,27 @@ def train(data_path: str):
     tokenizer = Tokenizer.from_pretrained("gpt2")
     dataset = PretrainDataset(data_path, tokenizer)
 
-    BATCH_SIZE = 16
-    EPOCHS = 10
+    BATCH_SIZE = 32
+    EPOCHS = 2
 
-    data_loader = DataLoader(dataset, batch_size=16)
+    data_loader = DataLoader(dataset, batch_size=BATCH_SIZE)
     optimizer = AdamW(model.parameters())
     pad_id = 50257  # GPT2 vocab_size，即新增的 PAD token id
     loss_func = nn.CrossEntropyLoss(ignore_index=pad_id)
 
+    os.makedirs(save_dir, exist_ok=True)
+    start_time = time.time()
     all_losses = []
-    for e in range(EPOCHS):
+    total_steps = 0
+    for e in range(1):
         model.train()
         epoch_losses = []
         pbar = tqdm(enumerate(data_loader), total=len(data_loader), desc=f'Epoch {e+1}/{EPOCHS}', leave=False)
         for step_idx, (x, y) in pbar:
+            y = y.cuda()
             optimizer.zero_grad()
             context = ModelContext()
-            pred = model(x, context)  # [B, L, V]
+            pred = model(x.cuda(), context)  # [B, L, V]
             B, L, V = pred.shape
             loss = loss_func(pred.view(B * L, V), y.view(B * L))
             loss.backward()
@@ -89,10 +96,19 @@ def train(data_path: str):
             epoch_losses.append(loss.item())
             pbar.set_postfix(loss=f'{loss.item():.4f}', step=step_idx)
         all_losses.extend(epoch_losses)
+        total_steps += len(epoch_losses)
 
-        checkpoint_path = f'checkpoint_epoch_{e+1}.pt'
+        checkpoint_path = os.path.join(save_dir, f'checkpoint_epoch_{e+1}.pt')
         torch.save(model.state_dict(), checkpoint_path)
         logger.info(f'Saved checkpoint: {checkpoint_path}')
+
+    elapsed = time.time() - start_time
+    info_path = os.path.join(save_dir, 'training_info.txt')
+    with open(info_path, 'w') as f:
+        f.write(f'总训练批次 (epochs): {EPOCHS}\n')
+        f.write(f'总训练步数 (steps): {total_steps}\n')
+        f.write(f'总耗时: {elapsed:.2f} 秒 ({elapsed/60:.2f} 分钟)\n')
+    logger.info(f'Saved training info: {info_path}')
 
     import matplotlib.pyplot as plt
     plt.figure(figsize=(10, 5))
@@ -100,12 +116,13 @@ def train(data_path: str):
     plt.xlabel('Step')
     plt.ylabel('Loss')
     plt.title('Training Loss')
-    plt.savefig('training_loss.png')
+    plt.savefig(os.path.join(save_dir, 'training_loss.png'))
     plt.show()
 
 
 if __name__ == '__main__':
     parser = argparse.ArgumentParser()
     parser.add_argument('--data_path', type=str, required=True, help='Path to the training data JSONL file')
+    parser.add_argument('--save_dir', type=str, default='./output', help='Directory to save model checkpoints and training info')
     args = parser.parse_args()
-    train(args.data_path)
+    train(args.data_path, args.save_dir)
