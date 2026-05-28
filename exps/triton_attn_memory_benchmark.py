@@ -24,9 +24,9 @@ def measure_memory(provider: PROVIDERS, seq_len: int, dtype: torch.dtype, D: int
 
     # 创建输入张量（不计算梯度）
     with torch.no_grad():
-        q = torch.randn((batch_size, num_q_heads, seq_len, head_dim), dtype=dtype, device=DEVICE)
-        k = torch.randn((batch_size, num_kv_heads, seq_len, head_dim), dtype=dtype, device=DEVICE)
-        v = torch.randn((batch_size, num_kv_heads, seq_len, head_dim), dtype=dtype, device=DEVICE)
+        q = torch.randn((batch_size, seq_len, num_q_heads, head_dim), dtype=dtype, device=DEVICE).transpose(1,2)
+        k = torch.randn((batch_size, seq_len, num_kv_heads, head_dim), dtype=dtype, device=DEVICE).transpose(1,2)
+        v = torch.randn((batch_size, seq_len, num_kv_heads, head_dim), dtype=dtype, device=DEVICE).transpose(1,2)
 
     # 创建算子
     attn_op = ComponentFactory.create(
@@ -69,7 +69,7 @@ def run_benchmark():
     head_dim = 128
     num_q_heads = 16
     num_kv_heads = 8
-    dtype = torch.float32
+    dtype = torch.bfloat16
 
     # 序列长度范围
     seq_lengths = [64 * i for i in range(1, 33)]  # 64, 128, ..., 2048
@@ -112,8 +112,7 @@ def run_benchmark():
     plt.tight_layout()
 
     # 保存图表
-    output_path = "/home/hego/exercise/tech/dl/qwen3_from_scratch/exps/attn_memory_benchmark.png"
-    plt.savefig(output_path, dpi=150)
+    output_path = "/workspace/examples/qwen3_from_scratch/pics"
     print(f"\nPlot saved to: {output_path}")
 
     # 显示图表
