@@ -49,7 +49,7 @@ def generate(
         if idx_next == eos_id:
             break
         idx = torch.cat((idx, idx_next), dim=1)
-        if tokenizer is not None and context.use_cache:
+        if tokenizer is not None:
             if stream:
                 yield tokenizer.decode(
                     idx.squeeze(0).tolist()[-1:], skip_special_tokens=False
