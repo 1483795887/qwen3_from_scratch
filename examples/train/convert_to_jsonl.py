@@ -11,7 +11,7 @@ def parse_to_jsonl(input_path: str, output_path: str) -> None:
 
     with open(output_path, "w", encoding="utf-8") as f:
         for seg in tqdm.tqdm(segments):
-            record = {"Text": seg.strip()}
+            record = {"Text": seg.strip() + "<|endoftext|>"}
             f.write(json.dumps(record, ensure_ascii=False) + "\n")
 
 
