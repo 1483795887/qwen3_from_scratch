@@ -148,25 +148,26 @@ def simple_swiglu(
   output: torch.Tensor,
   residual: Optional[torch.Tensor] = None
 ):
-  B, N, D = x.shape
+  D = x.shape[-1]
   D1, _ = merged_weight.shape
   assert D1 % 2 == 0
   assert merged_weight.shape == (D1, D), f"merged_weight shape mismatch: expected {(D1, D)}, got {merged_weight.shape}"
   assert down_proj_weight.shape == (D, D1 // 2), f"down_proj_weight shape mismatch: expected {(D, D1 // 2)}, got {down_proj_weight.shape}"
   assert output.shape == x.shape, f"output shape mismatch: expected {x.shape}, got {output.shape}"
-  # 简单起见要求三个都连续，也是应该的
+  # 简单起见要求连续
   assert x.is_contiguous(), "x must be contiguous"
-  assert merged_weight.is_contiguous(), "up_proj_weight must be contiguous"
+  assert merged_weight.is_contiguous(), "merged_weight must be contiguous"
   assert down_proj_weight.is_contiguous(), "down_proj_weight must be contiguous"
   assert output.is_contiguous(), "output must be contiguous"
-  merged_embed = torch.empty(B, N, D1, dtype=x.dtype, device=x.device)
+  M = x.numel() // D
+  merged_embed = torch.empty(M, D1, dtype=x.dtype, device=x.device)
   linear(x, merged_weight, merged_embed)
   split_D = D1 // 2
   up_embed, gate_embed = torch.split(merged_embed, [split_D, split_D], dim=-1)
   BLOCK_SIZE_D = 128
 
-  grid = [triton.cdiv(split_D, BLOCK_SIZE_D), B*N]
-  swiglu_gate[grid](up_embed, gate_embed, B*N, split_D, BLOCK_SIZE_D)
+  grid = [triton.cdiv(split_D, BLOCK_SIZE_D), M]
+  swiglu_gate[grid](up_embed, gate_embed, M, split_D, BLOCK_SIZE_D)
 
   linear(up_embed, down_proj_weight, output, bias=residual)
 
