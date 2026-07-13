@@ -1,6 +1,6 @@
 import json
 from dataclasses import dataclass, field
-from typing import Any, Dict, Literal
+from typing import Any, Dict, Literal, Union
 
 ACTIVATIONS = Literal["silu"]
 NORM_TYPE = Literal["rms_norm"]
@@ -52,6 +52,31 @@ class ModelConfig:
     decoder_layer: ComponentConfig = field(
         default_factory=lambda: ComponentConfig("base")
     )
+
+
+@dataclass
+class GenerationConfig:
+    bos_token_id: int = 151643
+    eos_token_id: Union[int, list[int]] = 151645
+    pad_token_id: int = 151643
+    temperature: float = 1.0
+    top_k: int = 0
+    top_p: float = 1.0
+    do_sample: bool = False
+
+    @classmethod
+    def load_from_file(cls, file_path: str):
+        with open(file_path, "r") as file:
+            data = json.load(file)
+            return cls(
+                bos_token_id=data.get("bos_token_id", 151643),
+                eos_token_id=data.get("eos_token_id", 151645),
+                pad_token_id=data.get("pad_token_id", 151643),
+                temperature=data.get("temperature", 1.0),
+                top_k=data.get("top_k", 0),
+                top_p=data.get("top_p", 1.0),
+                do_sample=data.get("do_sample", False),
+            )
 
 
 def load_from_file(file_path: str):

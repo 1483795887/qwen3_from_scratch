@@ -1,4 +1,4 @@
-from typing import Iterable
+from typing import Iterable, Union, Collection
 
 import torch
 import torch.nn as nn
@@ -13,7 +13,7 @@ def generate(
     context: ModelContext,
     temperature: float = 1.0,
     top_k=None,
-    eos_id=None,
+    eos_ids: Union[int, Collection[int], None] = None,
     tokenizer=None,
     device="cuda",
     stream=False,
@@ -21,6 +21,13 @@ def generate(
     is_prefill = True
     model = model.to(device)
     idx = idx.to(device)
+    # Normalize eos_ids: support single int, collection, or None
+    if eos_ids is None:
+        eos_ids = set()
+    elif isinstance(eos_ids, int):
+        eos_ids = {eos_ids}
+    else:
+        eos_ids = set(eos_ids)
     for _ in range(max_new_tokens):
         with torch.no_grad():
             if is_prefill or not context.use_cache:
@@ -46,7 +53,8 @@ def generate(
 
         else:
             idx_next = torch.argmax(logits, dim=-1, keepdim=True)
-        if idx_next == eos_id:
+        next_id = idx_next.item()
+        if next_id in eos_ids:
             break
         idx = torch.cat((idx, idx_next), dim=1)
         if tokenizer is not None:
