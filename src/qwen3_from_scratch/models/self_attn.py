@@ -39,11 +39,12 @@ class SelfAttention(nn.Module):
     def forward(self, x, context: ModelContext):
         input_shape = x.shape[:-1]
         hidden_shape = (*input_shape, -1, self.config.head_dim)
+        dtype = x.dtype
         q = self.q_norm(self.q_proj(x).view(hidden_shape)).transpose(1, 2)
         k = self.k_norm(self.k_proj(x).view(hidden_shape)).transpose(1, 2)
         v = self.v_proj(x).view(hidden_shape).transpose(1, 2)
-        q = self.rope(q, context)
-        k = self.rope(k, context)
+        q = self.rope(q, context).to(dtype)
+        k = self.rope(k, context).to(dtype)
         if context.use_cache:
             k,v = context.kv_cache.update(k.transpose(1, 2), v.transpose(1,2), self.layer_idx, context.cache_position)
             k = k.transpose(1, 2)
