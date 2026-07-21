@@ -7,7 +7,7 @@ import torch
 from tokenizers import Tokenizer
 
 from qwen3_from_scratch.factory.config import load_from_file
-from qwen3_from_scratch.inference.context import ModelContext
+from qwen3_from_scratch.inference.context import ModelContext, set_forward_context
 from qwen3_from_scratch.inference.kv_cache.pre_allocated_kv_cache import (
     PreAllocatedKVCache,
 )
@@ -31,14 +31,15 @@ def warmup(model, config, device):
             context.position_embeddings = None
             is_prefill = True
             cur = idx
+            set_forward_context(context)
             for _ in range(10):
                 if is_prefill:
                     context.cache_position = 0
-                    logits = model(cur, context=context)
+                    logits = model(cur)
                     is_prefill = False
                 else:
                     context.cache_position = cur.shape[1] - 1
-                    logits = model(cur[:, -1:], context=context)
+                    logits = model(cur[:, -1:])
                 logits = logits[:, -1, :]
                 probs = torch.softmax(logits / 0.7, dim=-1)
                 nxt = torch.multinomial(probs, num_samples=1)
@@ -76,14 +77,15 @@ def benchmark(model, config, tokenizer, prompt_tokens, max_new_tokens, device, n
             torch.cuda.synchronize() if device == "cuda" else None
             start = time.perf_counter()
 
+            set_forward_context(context)
             with torch.no_grad():
                 if is_prefill:
                     context.cache_position = 0
-                    logits = model(idx, context=context)
+                    logits = model(idx)
                     is_prefill = False
                 else:
                     context.cache_position = idx.shape[1] - 1
-                    logits = model(idx[:, -1:], context=context)
+                    logits = model(idx[:, -1:])
 
             logits = logits[:, -1, :]
             probs = torch.softmax(logits / 0.7, dim=-1)

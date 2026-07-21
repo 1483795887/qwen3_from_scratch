@@ -5,7 +5,7 @@ import torch
 from torch import nn
 
 from qwen3_from_scratch.factory import ComponentFactory, ModelConfig
-from qwen3_from_scratch.inference.context import ModelContext, PositionEmbeddings
+from qwen3_from_scratch.inference.context import get_forward_context, PositionEmbeddings
 from qwen3_from_scratch.models.common import assign
 from qwen3_from_scratch.models.parameter_loader import ParameterLoader
 
@@ -36,17 +36,18 @@ class SelfAttention(nn.Module):
             "norm", config, name=f"{self.name}.q_norm"
         )
 
-    def forward(self, x, context: ModelContext):
+    def forward(self, x):
+        ctx = get_forward_context()
         input_shape = x.shape[:-1]
         hidden_shape = (*input_shape, -1, self.config.head_dim)
         dtype = x.dtype
         q = self.q_norm(self.q_proj(x).view(hidden_shape)).transpose(1, 2)
         k = self.k_norm(self.k_proj(x).view(hidden_shape)).transpose(1, 2)
         v = self.v_proj(x).view(hidden_shape).transpose(1, 2)
-        q = self.rope(q, context).to(dtype)
-        k = self.rope(k, context).to(dtype)
-        if context.use_cache:
-            k,v = context.kv_cache.update(k.transpose(1, 2), v.transpose(1,2), self.layer_idx, context.cache_position)
+        q = self.rope(q).to(dtype)
+        k = self.rope(k).to(dtype)
+        if ctx.use_cache:
+            k,v = ctx.kv_cache.update(k.transpose(1, 2), v.transpose(1,2), self.layer_idx, ctx.cache_position)
             k = k.transpose(1, 2)
             v = v.transpose(1, 2)
         o = (
@@ -114,19 +115,20 @@ class FusedSelfAttention(nn.Module):
         emb = torch.cat([freqs, freqs], dim=-1)
         return PositionEmbeddings(emb.cos().to(dtype), emb.sin().to(dtype))
 
-    def _forward_pytorch(self, x, context, residual=None):
+    def _forward_pytorch(self, x, residual=None):
+        ctx = get_forward_context()
         B, S, _ = x.shape
         H_q = self.num_heads
         H_kv = self.num_kv_heads
         D = self.head_dim
 
-        if context.position_embeddings is None:
-            context.position_embeddings = self._build_rope_embeddings(
-                context.position_ids, x.dtype
+        if ctx.position_embeddings is None:
+            ctx.position_embeddings = self._build_rope_embeddings(
+                ctx.position_ids, x.dtype
             )
 
-        cos = context.position_embeddings.cos_embed
-        sin = context.position_embeddings.sin_embed
+        cos = ctx.position_embeddings.cos_embed
+        sin = ctx.position_embeddings.sin_embed
         if cos.dim() == 3:
             cos = cos[0]
             sin = sin[0]
@@ -154,10 +156,10 @@ class FusedSelfAttention(nn.Module):
         k = k.transpose(1, 2)
         v = v.transpose(1, 2)
 
-        if context.use_cache:
-            k, v = context.kv_cache.update(
+        if ctx.use_cache:
+            k, v = ctx.kv_cache.update(
                 k.transpose(1, 2), v.transpose(1, 2),
-                self.layer_idx, context.cache_position,
+                self.layer_idx, ctx.cache_position,
             )
             k = k.transpose(1, 2)
             v = v.transpose(1, 2)
@@ -178,22 +180,23 @@ class FusedSelfAttention(nn.Module):
             o = o + residual
         return o
 
-    def forward(self, x: torch.Tensor, context: ModelContext, residual: Optional[torch.Tensor] = None):
+    def forward(self, x: torch.Tensor, residual: Optional[torch.Tensor] = None):
+        ctx = get_forward_context()
         if x.device.type == "cpu":
-            return self._forward_pytorch(x, context, residual)
+            return self._forward_pytorch(x, residual)
 
         B, S, _ = x.shape
         H_q = self.num_heads
         H_kv = self.num_kv_heads
         D = self.head_dim
 
-        if context.position_embeddings is None:
-            context.position_embeddings = self._build_rope_embeddings(
-                context.position_ids, x.dtype
+        if ctx.position_embeddings is None:
+            ctx.position_embeddings = self._build_rope_embeddings(
+                ctx.position_ids, x.dtype
             )
 
-        cos = context.position_embeddings.cos_embed
-        sin = context.position_embeddings.sin_embed
+        cos = ctx.position_embeddings.cos_embed
+        sin = ctx.position_embeddings.sin_embed
         if cos.dim() == 3:
             cos = cos[0]
             sin = sin[0]
@@ -232,12 +235,12 @@ class FusedSelfAttention(nn.Module):
             .transpose(1, 2)
         )
 
-        if context.use_cache:
-            k, v = context.kv_cache.update(
+        if ctx.use_cache:
+            k, v = ctx.kv_cache.update(
                 k.transpose(1, 2),
                 v.transpose(1, 2),
                 self.layer_idx,
-                context.cache_position,
+                ctx.cache_position,
             )
             k = k.contiguous().transpose(1, 2)
             v = v.contiguous().transpose(1, 2)

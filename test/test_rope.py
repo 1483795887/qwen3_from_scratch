@@ -8,7 +8,7 @@ from transformers.models.qwen3.modeling_qwen3 import (
 )
 
 from qwen3_from_scratch.factory import ComponentFactory
-from qwen3_from_scratch.inference.context import ModelContext
+from qwen3_from_scratch.inference.context import ModelContext, set_forward_context
 
 
 @pytest.mark.parametrize("component_type", ["base", "my_op"])
@@ -22,8 +22,9 @@ def test_rope(model_config, component_type, device):
             "rope", config, component_impl=component_type
         ).to(device)
         x = torch.randn(shape).to(device)
+        set_forward_context(context)
         with torch.no_grad():
-            x = rope(x, context)
+            x = rope(x)
             assert x.shape == shape
 
 
@@ -39,8 +40,9 @@ def test_rope_with_position_inputs(model_config, component_type, device):
             "rope", config, component_impl=component_type
         ).to(device)
         x = torch.randn(shape).to(device)
+        set_forward_context(context)
         with torch.no_grad():
-            x = rope(x, context)
+            x = rope(x)
             assert x.shape == shape
 
 
@@ -72,7 +74,8 @@ def test_rope_against_transformers(
         official_k, official_v = apply_rotary_pos_emb(
             k, v, *position_embeddings
         )
-        new_k = new_rope(k, context)
-        new_v = new_rope(v, context)
+        set_forward_context(context)
+        new_k = new_rope(k)
+        new_v = new_rope(v)
         assert torch.allclose(official_k, new_k, atol=1e-5)
         assert torch.allclose(official_v, new_v, atol=1e-5)

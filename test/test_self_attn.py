@@ -5,7 +5,7 @@ from transformers import DynamicCache
 from transformers.models.qwen3.modeling_qwen3 import Qwen3Attention
 
 from qwen3_from_scratch.factory import ComponentFactory
-from qwen3_from_scratch.inference.context import ModelContext
+from qwen3_from_scratch.inference.context import ModelContext, set_forward_context
 from qwen3_from_scratch.inference.kv_cache.pre_allocated_kv_cache import (
     PreAllocatedKVCache,
 )
@@ -32,8 +32,9 @@ def test_self_attn_shape_correct(
     ).to(device)
     context = ModelContext()
     context.position_ids = torch.arange(0, n_seq).view(1, -1).to(device)
+    set_forward_context(context)
     with torch.no_grad():
-        out = self_attn(x, context)
+        out = self_attn(x)
         assert out.shape == x.shape
 
 
@@ -59,9 +60,10 @@ def test_self_attn_shape_correct_with_kv_cache(
     context.kv_cache.update(cache_k, cache_v, 3)
     context.use_cache = True
 
+    set_forward_context(context)
     with torch.no_grad():
         x = torch.randn(2, 1, model_config.hidden_size).to(device)
-        out = self_attn(x, context)
+        out = self_attn(x)
         assert out.shape == (2, 1, model_config.hidden_size)
 
 
@@ -80,7 +82,8 @@ def test_self_attn_output_close_to_transformers(
         x = torch.randn(2, 256, model_config.hidden_size).to(device)
         context = ModelContext()
         context.position_ids = torch.arange(0, 256).view(1, -1).to(device)
-        output = self_attn(x, context)
+        set_forward_context(context)
+        output = self_attn(x)
         position_embeddings = context.position_embeddings
         attn_mask = create_causal_attention_mask(x.shape[1], x.device, x.dtype)
         off_output, _ = off_self_attn(
@@ -129,7 +132,8 @@ def test_self_attn_output_close_to_transformers_with_kv_cache(
     with torch.no_grad():
         torch.manual_seed(42)
         x = torch.randn(2, 1, model_config.hidden_size).to(device)
-        output = self_attn(x, context)
+        set_forward_context(context)
+        output = self_attn(x)
         position_embeddings = context.position_embeddings
         off_output, _ = off_self_attn(
             x,

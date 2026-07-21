@@ -2,7 +2,7 @@ import torch
 from torch import nn
 
 from qwen3_from_scratch.factory import ComponentFactory, ModelConfig
-from qwen3_from_scratch.inference.context import ModelContext
+from qwen3_from_scratch.inference.context import get_forward_context
 from qwen3_from_scratch.models.common import assign
 from qwen3_from_scratch.models.parameter_loader import ParameterLoader
 
@@ -48,20 +48,21 @@ class Qwen3(nn.Module):
             self.output_head.weight, loader.get("lm_head.weight")
         )
 
-    def forward(self, idx: torch.Tensor, context: ModelContext):
+    def forward(self, idx: torch.Tensor):
+        ctx = get_forward_context()
         tok_embd = self.tok_embd(idx)
-        context.position_ids = torch.arange(
-            context.cache_position,
-            context.cache_position + idx.shape[1],
+        ctx.position_ids = torch.arange(
+            ctx.cache_position,
+            ctx.cache_position + idx.shape[1],
             dtype=torch.long,
             device=tok_embd.device,
         ).unsqueeze(0)
-        context.position_embeddings = self.rope.build_cos_sin_embed(
-            context.dtype, context.position_ids
+        ctx.position_embeddings = self.rope.build_cos_sin_embed(
+            ctx.dtype, ctx.position_ids
         )
         x = tok_embd
         for layer in self.trf_blocks:
-            x = layer(x, context)
+            x = layer(x)
         x = self.final_norm(x)
         logits = self.output_head(x)
         return logits

@@ -11,7 +11,7 @@ import torch
 from tokenizers import Tokenizer
 
 from qwen3_from_scratch.factory.config import load_from_file
-from qwen3_from_scratch.inference.context import ModelContext
+from qwen3_from_scratch.inference.context import ModelContext, set_forward_context
 from qwen3_from_scratch.inference.generate import generate
 from qwen3_from_scratch.inference.kv_cache.pre_allocated_kv_cache import (
     PreAllocatedKVCache,
@@ -90,13 +90,14 @@ def benchmark_generation(
         start_time = time.perf_counter()
         
         with torch.no_grad():
+            set_forward_context(context)
             if is_prefill or not context.use_cache:
                 context.cache_position = 0
-                logits = model(idx, context=context)
+                logits = model(idx)
                 is_prefill = False
             else:
                 context.cache_position = idx.shape[1] - 1
-                logits = model(idx[:, -1:], context=context)
+                logits = model(idx[:, -1:])
         
         logits = logits[:, -1, :]
         

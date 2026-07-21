@@ -3,7 +3,7 @@ from torch import nn
 
 from qwen3_from_scratch.factory import ComponentFactory, ModelConfig
 from qwen3_from_scratch.inference.context import (
-    ModelContext,
+    get_forward_context,
     PositionEmbeddings,
 )
 
@@ -42,24 +42,20 @@ class PythonRope(nn.Module):
         emb = torch.cat([freqs, freqs], dim=-1)
         return PositionEmbeddings(emb.cos().to(dtype), emb.sin().to(dtype))
 
-    def forward(self, x: torch.Tensor, context: ModelContext):
-        """
-        Args:
-            x: [batch, num_heads, seq_len, dim]
-            context: 上下文数据，包含 position_ids 和 position_embeddings 等
-        """
+    def forward(self, x: torch.Tensor):
+        ctx = get_forward_context()
         seq_len = x.shape[2]
 
-        if context.position_ids is None:
-            context.position_ids = torch.arange(
+        if ctx.position_ids is None:
+            ctx.position_ids = torch.arange(
                 seq_len, device=x.device
             ).unsqueeze(0)
-        if context.position_embeddings is None:
-            context.position_embeddings = self.build_cos_sin_embed(
-                x, context.position_ids
+        if ctx.position_embeddings is None:
+            ctx.position_embeddings = self.build_cos_sin_embed(
+                x, ctx.position_ids
             )
-        emb_cos = context.position_embeddings.cos_embed[None, :, :]
-        emb_sin = context.position_embeddings.sin_embed[None, :, :]
+        emb_cos = ctx.position_embeddings.cos_embed[None, :, :]
+        emb_sin = ctx.position_embeddings.sin_embed[None, :, :]
 
         # NeoX风格旋转
         if self.rope_type == "neox":
@@ -71,20 +67,21 @@ class PythonRope(nn.Module):
 
 @ComponentFactory.register("rope", "my_op")
 class MyRope(PythonRope):
-  def forward(self, x: torch.Tensor, context: ModelContext):
+  def forward(self, x: torch.Tensor):
+    ctx = get_forward_context()
     if self.rope_type == "normal" or not x.is_cuda:
-      return super().forward(x, context)
+      return super().forward(x)
     seq_len = x.shape[2]
 
-    if context.position_ids is None:
-        context.position_ids = torch.arange(
+    if ctx.position_ids is None:
+        ctx.position_ids = torch.arange(
             seq_len, device=x.device
         ).unsqueeze(0)
-    if context.position_embeddings is None:
-        context.position_embeddings = self.build_cos_sin_embed(
-            x, context.position_ids
+    if ctx.position_embeddings is None:
+        ctx.position_embeddings = self.build_cos_sin_embed(
+            x, ctx.position_ids
         )
-    emb_cos = context.position_embeddings.cos_embed[None, :, :]
-    emb_sin = context.position_embeddings.sin_embed[None, :, :]
+    emb_cos = ctx.position_embeddings.cos_embed[None, :, :]
+    emb_sin = ctx.position_embeddings.sin_embed[None, :, :]
     from qwen3_from_scratch.kernels.triton.rope import neox_rope
     return neox_rope(x, emb_cos, emb_sin)

@@ -1,7 +1,7 @@
 from torch.profiler import profile, record_function, ProfilerActivity
 from qwen3_from_scratch.factory import ComponentFactory, ModelConfig
 from qwen3_from_scratch.models.qwen3 import Qwen3
-from qwen3_from_scratch.inference.context import ModelContext
+from qwen3_from_scratch.inference.context import ModelContext, set_forward_context
 import torch
 import os
 from qwen3_from_scratch.utils.env import load_env_file
@@ -21,7 +21,8 @@ def main():
     ) as prof:
         with record_function("model_infer"):
             context = ModelContext()
-            model(x, context)
+            set_forward_context(context)
+            model(x)
             mem = torch.cuda.max_memory_allocated() / 1024**2
             print(f"显存占用 {mem}")
 

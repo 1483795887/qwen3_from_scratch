@@ -1,7 +1,7 @@
 from qwen3_from_scratch.factory import ComponentFactory, ModelConfig
 from qwen3_from_scratch.models.qwen3 import Qwen3
 import torch
-from qwen3_from_scratch.inference.context import ModelContext
+from qwen3_from_scratch.inference.context import ModelContext, set_forward_context
 import torch.nn as nn
 from torch.optim import AdamW
 from dataset import PretrainDataset
@@ -88,7 +88,8 @@ def train(data_path: str, save_dir: str = './output'):
             y = y.cuda()
             optimizer.zero_grad()
             context = ModelContext()
-            pred = model(x.cuda(), context)  # [B, L, V]
+            set_forward_context(context)
+            pred = model(x.cuda())  # [B, L, V]
             B, L, V = pred.shape
             loss = loss_func(pred.view(B * L, V), y.view(B * L))
             loss.backward()

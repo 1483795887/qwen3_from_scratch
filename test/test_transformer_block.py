@@ -7,7 +7,7 @@ from transformers.models.qwen3.modeling_qwen3 import (
 )
 
 from qwen3_from_scratch.factory import ComponentFactory
-from qwen3_from_scratch.inference.context import ModelContext
+from qwen3_from_scratch.inference.context import ModelContext, set_forward_context
 from qwen3_from_scratch.models.attn import create_causal_attention_mask
 from qwen3_from_scratch.models.parameter_loader import ParameterLoader
 
@@ -32,8 +32,9 @@ def test_transformer_block_shape_correct(
     ).to(device)
     context = ModelContext()
     context.position_ids = torch.arange(0, n_seq).view(1, -1).to(device)
+    set_forward_context(context)
     with torch.no_grad():
-        output = transformer_block(x, context)
+        output = transformer_block(x)
         assert output.shape == x.shape
 
 
@@ -67,7 +68,8 @@ def test_transformer_block_output_close_to_transformers(
         )
         position_embeddings = hf_rotary_embed(x, position_ids=position_ids)
 
-        output = transformer_block(x, context)
+        set_forward_context(context)
+        output = transformer_block(x)
         hf_output = hf_decoder_layer(
             x,
             attention_mask=attention_mask,

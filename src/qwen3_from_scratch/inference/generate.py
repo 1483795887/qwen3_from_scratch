@@ -3,7 +3,7 @@ from typing import Iterable, Union, Collection
 import torch
 import torch.nn as nn
 
-from qwen3_from_scratch.inference.context import ModelContext
+from qwen3_from_scratch.inference.context import ModelContext, set_forward_context
 
 
 def generate(
@@ -28,15 +28,16 @@ def generate(
         eos_ids = {eos_ids}
     else:
         eos_ids = set(eos_ids)
+    set_forward_context(context)
     for _ in range(max_new_tokens):
         with torch.no_grad():
             if is_prefill or not context.use_cache:
                 context.cache_position = 0
-                logits = model(idx, context=context)
+                logits = model(idx)
                 is_prefill = False
             else:
                 context.cache_position = idx.shape[1] - 1
-                logits = model(idx[:, -1:], context=context)
+                logits = model(idx[:, -1:])
         logits = logits[:, -1, :]
         if top_k is not None:
             top_logits, _ = torch.topk(logits, top_k)

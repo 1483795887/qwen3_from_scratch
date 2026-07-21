@@ -1,7 +1,7 @@
 from torch import nn
 
 from qwen3_from_scratch.factory import ComponentFactory, ModelConfig
-from qwen3_from_scratch.inference.context import ModelContext
+from qwen3_from_scratch.inference.context import get_forward_context
 from qwen3_from_scratch.models.parameter_loader import ParameterLoader
 
 
@@ -21,10 +21,10 @@ class PythonTransformerBlock(nn.Module):
                                                                 dim=config.hidden_size)
         self.mlp = ComponentFactory.create("mlp", config, name=f'{self.name}.mlp')
 
-    def forward(self, x, context: ModelContext):
+    def forward(self, x):
         inp_x = x
         x = self.input_layernorm(x)
-        x = self.self_attn(x, context)
+        x = self.self_attn(x)
         ffn_inp_x = x + inp_x
         x = ffn_inp_x
         x = self.post_attention_layernorm(x)
@@ -54,10 +54,10 @@ class FusedTransformerBlock(nn.Module):
                                                                 dim=config.hidden_size)
         self.mlp = ComponentFactory.create("mlp", config, "my_op", name=f'{self.name}.mlp')
 
-    def forward(self, x, context: ModelContext):
+    def forward(self, x):
         inp_x = x
         x = self.input_layernorm(x)
-        x = self.self_attn(x, context, residual=inp_x)
+        x = self.self_attn(x, residual=inp_x)
         ffn_inp_x = x
         x = self.post_attention_layernorm(x)
         x = self.mlp(x, residual=ffn_inp_x)
