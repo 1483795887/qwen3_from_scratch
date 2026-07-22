@@ -22,7 +22,7 @@ class SelfAttention(nn.Module):
         self.name = name
         self.layer_idx = layer_idx
         self.config = config
-        self.gqa = ComponentFactory.create("attn", config)
+        self.gqa = ComponentFactory.create("attn", config, layer_idx=layer_idx)
         self.rope = ComponentFactory.create("rope", config)
 
         self.k_proj = nn.Linear(hidden_size, kv_embed_size, bias=False)

@@ -19,6 +19,10 @@ class ModelContext:
     position_ids: torch.Tensor = None
     position_embeddings: PositionEmbeddings = None
     cache_position: int = 0
+    num_tokens: torch.Tensor = field(default=torch.Tensor)
+    is_prefill: bool = True
+    block_tables: torch.Tensor = field(default=torch.Tensor)
+    block_size: int = 16
 
 
 _CONTEXT = ModelContext()
