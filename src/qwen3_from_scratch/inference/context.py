@@ -23,6 +23,8 @@ class ModelContext:
     is_prefill: bool = True
     block_tables: torch.Tensor = field(default=torch.Tensor)
     block_size: int = 16
+    cum_seq_lens_q: torch.Tensor = field(default=torch.Tensor)
+    cum_seq_lens_kv: torch.Tensor = field(default=torch.Tensor)
 
 
 _CONTEXT = ModelContext()
