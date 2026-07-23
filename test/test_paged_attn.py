@@ -42,21 +42,52 @@ def _create_kv_cache(model_config, n_batch, n_seq, block_size, layer_idx, device
     block_tables = torch.arange(
         n_batch * num_blocks_per_batch, dtype=torch.int32, device=device
     ).reshape(n_batch, num_blocks_per_batch)
-    kv_cache.block_tables = block_tables
     return kv_cache, block_tables
 
 
-def _run_paged_attn(paged_attn, q, k, v, kv_cache, block_tables, block_size, cache_position):
+def _build_slot_mapping(block_tables, seq_lens, max_seq_len, block_size, device):
+    """根据 block_tables 构造 slot_mapping。
+
+    对于 batch b 的第 i 个 token (i < seq_lens[b]):
+        slot = block_tables[b, i // block_size] * block_size + (i % block_size)
+    对于 padding (i >= seq_lens[b]):
+        slot = -1 (跳过)
+
+    返回扁平张量, 形状 (n_batch * max_seq_len,)。
+    """
+    n_batch = block_tables.shape[0]
+    token_indices = torch.arange(max_seq_len, device=device)
+    block_indices = token_indices // block_size          # (max_seq_len,)
+    offsets = token_indices % block_size                 # (max_seq_len,)
+    block_ids = block_tables[:, block_indices]           # (n_batch, max_seq_len)
+    slots = block_ids * block_size + offsets.unsqueeze(0)  # (n_batch, max_seq_len)
+    slot_mapping = slots.reshape(-1)                     # (n_batch * max_seq_len,)
+
+    if isinstance(seq_lens, int):
+        seq_lens = [seq_lens] * n_batch
+    for b in range(n_batch):
+        n = seq_lens[b]
+        if n < max_seq_len:
+            slot_mapping[b * max_seq_len + n: (b + 1) * max_seq_len] = -1
+
+    return slot_mapping.to(torch.int32)
+
+
+def _run_paged_attn(paged_attn, q, k, v, kv_cache, block_tables, block_size,
+                    slot_mapping, cache_position):
+    """在同一个 context 中完成 update + forward。"""
     context = ModelContext(
         use_cache=True,
         kv_cache=kv_cache,
         cache_position=cache_position,
         block_tables=block_tables,
         block_size=block_size,
+        slot_mapping=slot_mapping,
     )
     old_context = get_forward_context()
     try:
         set_forward_context(context)
+        kv_cache.update(k.transpose(1, 2), v.transpose(1, 2), paged_attn.layer_idx)
         return paged_attn(q, k, v)
     finally:
         set_forward_context(old_context)
@@ -107,41 +138,17 @@ def test_torch_paged_attn(model_config, qwen3_config, device):
         )
 
         # --- PagedKVCache 设置 ---
-        num_blocks_per_batch = (n_seq + block_size - 1) // block_size  # 16
-        num_pages_needed = n_batch * num_blocks_per_batch  # 32
-        # 计算足够的 mem_size (只需 1 层)
-        itemsize = torch.tensor(0, dtype=torch.float32).element_size()
-        block_size_in_bytes = 1 * num_heads_kv * head_dim * itemsize * block_size
-        mem_size = (num_pages_needed + 4) * 2 * block_size_in_bytes
-
-        kv_cache = PagedKVCache(
-            mem_size=mem_size, layers=1, num_heads=num_heads_kv, head_dim=head_dim,
-            dtype=torch.float32, block_size=block_size, device=device,
+        kv_cache, block_tables = _create_kv_cache(
+            model_config, n_batch, n_seq, block_size, layer_idx, device,
+        )
+        slot_mapping = _build_slot_mapping(
+            block_tables, n_seq, n_seq, block_size, device,
         )
 
-        # block_tables: 顺序映射 batch 0 -> pages[0..15], batch 1 -> pages[16..31]
-        block_tables = torch.arange(
-            n_batch * num_blocks_per_batch, dtype=torch.int32, device=device
-        ).reshape(n_batch, num_blocks_per_batch)
-        kv_cache.block_tables = block_tables
-
-        # 将 k, v 写入分页缓存 (update 接收 BSHD 格式)
-        kv_cache.update(k.transpose(1, 2), v.transpose(1, 2), layer_idx, cache_pos=0)
-
-        # --- 设置全局上下文 ---
-        context = ModelContext(
-            use_cache=True,
-            kv_cache=kv_cache,
-            cache_position=n_seq - 1,  # query 位于最后一个位置, 因果掩码不遮蔽任何 KV
-            block_tables=block_tables,
-            block_size=block_size,
-        )
-        old_context = get_forward_context()
-        try:
-            set_forward_context(context)
-            new_o = new_gqa(q, k, v).transpose(1, 2)
-        finally:
-            set_forward_context(old_context)
+        new_o = _run_paged_attn(
+            new_gqa, q, k, v, kv_cache, block_tables, block_size,
+            slot_mapping, cache_position=n_seq - 1,
+        ).transpose(1, 2)
 
         # --- 对比 ---
         assert attn_output.shape == new_o.shape
@@ -178,11 +185,12 @@ def test_torch_paged_attn_prefill(model_config, device):
             q, k, v, is_causal=True, scale=scale, enable_gqa=True,
         )
 
-        kv_cache.update(k.transpose(1, 2), v.transpose(1, 2), layer_idx, cache_pos=0)
-
+        slot_mapping = _build_slot_mapping(
+            block_tables, n_seq, n_seq, block_size, device,
+        )
         new_o = _run_paged_attn(
             paged_attn, q, k, v, kv_cache, block_tables, block_size,
-            cache_position=n_seq - 1,
+            slot_mapping, cache_position=n_seq - 1,
         )
 
         assert ref.shape == new_o.shape
@@ -233,8 +241,16 @@ def _per_seq_sdpa_ref(q_shd, k_shd, v_shd, cum_seq_lens_q, cum_seq_lens_kv,
     return torch.cat(ref_parts, dim=0)
 
 
-def _run_var_len_paged_attn(paged_attn, q, k_dummy, v_dummy, kv_cache, block_tables,
-                            block_size, cum_seq_lens_q, cum_seq_lens_kv):
+def _run_var_len_paged_attn(paged_attn, q, k_bshd, v_bshd, kv_cache, block_tables,
+                            block_size, cum_seq_lens_q, cum_seq_lens_kv, seq_lens_kv,
+                            max_kv_per_seq):
+    """var_len 场景: 在同一个 context 中完成 update + forward。
+
+    k_bshd, v_bshd: (n_seqs, max_kv_per_seq, num_heads, head_dim) — BSHD, 含 padding。
+    """
+    slot_mapping = _build_slot_mapping(
+        block_tables, seq_lens_kv, max_kv_per_seq, block_size, q.device,
+    )
     context = ModelContext(
         use_cache=True,
         kv_cache=kv_cache,
@@ -242,11 +258,17 @@ def _run_var_len_paged_attn(paged_attn, q, k_dummy, v_dummy, kv_cache, block_tab
         block_size=block_size,
         cum_seq_lens_q=cum_seq_lens_q,
         cum_seq_lens_kv=cum_seq_lens_kv,
+        slot_mapping=slot_mapping,
     )
     old_context = get_forward_context()
     try:
         set_forward_context(context)
-        return paged_attn(q, k_dummy, v_dummy)
+        kv_cache.update(k_bshd, v_bshd, paged_attn.layer_idx)
+        # forward 不使用 k/v 参数 (从缓存读取), 传 dummy
+        k_dummy = torch.zeros_like(k_bshd)
+        v_dummy = torch.zeros_like(v_bshd)
+        return paged_attn(q, k_dummy.reshape(-1, *k_dummy.shape[2:]),
+                          v_dummy.reshape(-1, *v_dummy.shape[2:]))
     finally:
         set_forward_context(old_context)
 
@@ -294,18 +316,14 @@ def test_var_len_paged_attn_prefill(model_config, device):
             v_bshd[i, :n] = kv_shd[offset:offset + n]
             offset += n
 
-        kv_cache.update(k_bshd, v_bshd, layer_idx, cache_pos=0)
-
         ref = _per_seq_sdpa_ref(
             q_shd, kv_shd, kv_shd, cum_seq_lens_q.tolist(), cum_seq_lens_kv.tolist(),
             num_heads_q, num_heads_kv, head_dim, device, scale, is_causal=True,
         )
 
-        k_dummy = torch.zeros(total_kv, num_heads_kv, head_dim, device=device)
-        v_dummy = torch.zeros(total_kv, num_heads_kv, head_dim, device=device)
         new_o = _run_var_len_paged_attn(
-            paged_attn, q_shd, k_dummy, v_dummy, kv_cache, block_tables,
-            block_size, cum_seq_lens_q, cum_seq_lens_kv,
+            paged_attn, q_shd, k_bshd, v_bshd, kv_cache, block_tables,
+            block_size, cum_seq_lens_q, cum_seq_lens_kv, seq_lens, max_kv_per_seq,
         )
 
         assert ref.shape == new_o.shape
@@ -354,18 +372,14 @@ def test_var_len_paged_attn_decode(model_config, device):
             v_bshd[i, :n] = kv_shd[offset:offset + n]
             offset += n
 
-        kv_cache.update(k_bshd, v_bshd, layer_idx, cache_pos=0)
-
         ref = _per_seq_sdpa_ref(
             q_shd, kv_shd, kv_shd, cum_seq_lens_q.tolist(), cum_seq_lens_kv.tolist(),
             num_heads_q, num_heads_kv, head_dim, device, scale, is_causal=False,
         )
 
-        k_dummy = torch.zeros(total_kv, num_heads_kv, head_dim, device=device)
-        v_dummy = torch.zeros(total_kv, num_heads_kv, head_dim, device=device)
         new_o = _run_var_len_paged_attn(
-            paged_attn, q_shd, k_dummy, v_dummy, kv_cache, block_tables,
-            block_size, cum_seq_lens_q, cum_seq_lens_kv,
+            paged_attn, q_shd, k_bshd, v_bshd, kv_cache, block_tables,
+            block_size, cum_seq_lens_q, cum_seq_lens_kv, seq_lens_kv, max_kv_per_seq,
         )
 
         assert ref.shape == new_o.shape
@@ -418,12 +432,14 @@ def test_torch_paged_attn_prefill_with_existing_kv(model_config, device):
             attn_mask=attn_mask, scale=scale, enable_gqa=True,
         )
 
-        kv_cache.update(k_full_bshd, v_full_bshd, layer_idx, cache_pos=0)
-
+        slot_mapping = _build_slot_mapping(
+            block_tables, n_seq, n_seq, block_size, device,
+        )
         new_o = _run_paged_attn(
             paged_attn, q,
             k_full_bshd.transpose(1, 2), v_full_bshd.transpose(1, 2),
-            kv_cache, block_tables, block_size, cache_position=n_seq - 1,
+            kv_cache, block_tables, block_size,
+            slot_mapping, cache_position=n_seq - 1,
         )
 
         assert ref.shape == new_o.shape
