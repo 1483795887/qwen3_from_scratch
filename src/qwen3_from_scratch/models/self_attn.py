@@ -287,3 +287,56 @@ class FusedSelfAttention(nn.Module):
         self.k_norm_weight = assign(
             self.k_norm_weight, loader.get(f"{self.name}.k_norm.weight")
         )
+
+
+@ComponentFactory.register("self_attn", "paged_attn")
+class PagedSelfAttention(FusedSelfAttention):
+    def __init__(self, config: ModelConfig, name: str, layer_idx: int = 0, **kwargs):
+        super().__init__(config, name, layer_idx, **kwargs)
+        from qwen3_from_scratch.models.attn import TorchVarLenPagedAttn
+        self.attn = TorchVarLenPagedAttn(config, layer_idx=layer_idx)
+
+    def _forward_pytorch(self, x, residual=None):
+        ctx = get_forward_context()
+        total_seq_len, hidden_dim = x.shape
+        H_q = self.num_heads
+        H_kv = self.num_kv_heads
+        D = self.head_dim
+        # 统一要求推理部分生成好，不在这里生成了
+        assert ctx.position_embeddings is not None
+
+        cos = ctx.position_embeddings.cos_embed
+        sin = ctx.position_embeddings.sin_embed
+        if cos.dim() == 3:
+            cos = cos[0]
+            sin = sin[0]
+        assert cos.shape[0] > ctx.position_ids.max()
+
+        qkv = torch.nn.functional.linear(x, self.qkv_proj.weight).view((total_seq_len, -1, D))
+        q, k, v = qkv.split([H_q, H_kv, H_kv], dim=1)
+
+        q = torch.nn.functional.rms_norm(q, (D,), self.q_norm_weight, self.eps)
+        k = torch.nn.functional.rms_norm(k, (D,), self.k_norm_weight, self.eps)
+
+        cos_e = cos[ctx.position_ids].unsqueeze(1)
+        sin_e = sin[ctx.position_ids].unsqueeze(1)
+
+        def _rotate_half(x):
+            x1, x2 = x.chunk(2, dim=-1)
+            return torch.cat((-x2, x1), dim=-1)
+
+        q = q * cos_e + _rotate_half(q) * sin_e
+        k = k * cos_e + _rotate_half(k) * sin_e
+
+        ctx.kv_cache.update(k, v, self.layer_idx, ctx.cache_position)
+
+        o = self.attn(q, k, v)
+        o = o.reshape(total_seq_len, -1)
+        o = torch.nn.functional.linear(o, self.o_proj.weight)
+        if residual is not None:
+            o = o + residual
+        return o
+
+    def forward(self, x: torch.Tensor, residual: Optional[torch.Tensor] = None):
+        if not x.is_cuda:
+            return self._forward_pytorch(x, residual)

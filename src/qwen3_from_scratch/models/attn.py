@@ -284,9 +284,9 @@ class TorchPagedAttn(MyAttn):
 @ComponentFactory.register("attn", "var_len_paged_attn_torch")
 class TorchVarLenPagedAttn(MyAttn):
 
-    def __init__(self, config: ModelConfig, **kwargs) -> None:
+    def __init__(self, config: ModelConfig, layer_idx:int, **kwargs) -> None:
         super().__init__(config)
-        self.layer_idx: int = kwargs.get("layer_idx")
+        self.layer_idx: int = layer_idx
 
     def forward(self, q, k, v):
         """
