@@ -1,6 +1,7 @@
 import torch
 
 from .kv_cache import KVCache
+from ..context import get_forward_context
 
 
 class PagedKVCache(KVCache):
@@ -14,31 +15,34 @@ class PagedKVCache(KVCache):
         self.num_pages = num_pages
         self.k_cache = kv_cache[0]  # (layers, num_pages, block_size, num_heads, head_dim)
         self.v_cache = kv_cache[1]
-        self.block_tables: torch.Tensor | None = None
+
+    def _update_var_len(self, k: torch.Tensor, v: torch.Tensor, layer_idx: int):
+        """
+        将 k,v 写入分页缓存
+
+        k, v: (total_seq, num_heads, head_dim) - SHD 格式
+        slot_mapping: 每个 头部所在的 索引，非 block_id，而是更直接的 idx
+        """
+        context = get_forward_context()
+        assert context.slot_mapping is not None
+        slot_mapping = context.slot_mapping
+        assert k.shape[0] == slot_mapping.shape[0]
+        for i in range(k.shape[0]):
+            slot = slot_mapping[i]
+            if slot == -1:
+                continue
+            block_id, slot_id = slot // self.block_size, slot % self.block_size
+            self.k_cache[layer_idx, block_id, slot_id] = k[i]
+            self.v_cache[layer_idx, block_id, slot_id] = v[i]
+        return k,v
 
     def update(self, k: torch.Tensor, v: torch.Tensor, layer_idx: int, cache_pos: int = 0) -> tuple[
         torch.Tensor, torch.Tensor]:
-        """
-        将 k, v 写入分页缓存。
+        if len(k.shape) == 4:
+            k = k.reshape(-1, *k.shape[2:])
+            v = v.reshape(-1, *v.shape[2:])
 
-        k, v: (batch, seq, num_heads, head_dim) — BSHD 格式
-        cache_pos: 本次写入在缓存中的起始位置（绝对位置）
-        """
-        batch_size, seq_len, num_heads, head_dim = k.shape
-        for b in range(batch_size):
-            pos = cache_pos
-            remaining = seq_len
-            while remaining > 0:
-                block_idx = pos // self.block_size
-                offset = pos % self.block_size
-                block_id = self.block_tables[b][block_idx].item()
-                size = min(self.block_size - offset, remaining)
-                src_start = seq_len - remaining
-                self.k_cache[layer_idx, block_id, offset:offset + size] = k[b, src_start:src_start + size]
-                self.v_cache[layer_idx, block_id, offset:offset + size] = v[b, src_start:src_start + size]
-                pos += size
-                remaining -= size
-        return k, v
+        return self._update_var_len(k, v, layer_idx)
 
     def get(self, layer_idx: int) -> tuple[torch.Tensor, torch.Tensor]:
         # 这个用法和其他不太一样，这里返回的是所有空间，需要根据块号获得具体内容
