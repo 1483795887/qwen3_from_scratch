@@ -36,8 +36,11 @@ def pytest_runtest_call(item):
         # 执行原始的测试用例逻辑
         item.runtest()
     except ImportError as e:
-        if "qwen3_from_scratch.kernels.ops" in str(e) and 'module' in str(e):
-            pytest.skip(f"跳过测试：加载SO/组件失败，异常：{str(e)}")
+        msg = str(e)
+        if "qwen3_from_scratch.kernels.ops" in msg and 'module' in msg:
+            pytest.skip(f"跳过测试：加载SO/组件失败，异常：{msg}")
+        if "No module named 'triton'" in msg or "No module named 'triton." in msg:
+            pytest.skip(f"跳过测试：triton 不可用，异常：{msg}")
         raise
     except (OSError, RuntimeError) as e:
         # 补充捕获so加载的其他常见异常（如ctypes加载失败、运行时链接库缺失）

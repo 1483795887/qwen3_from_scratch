@@ -1,6 +1,11 @@
-import torch
-import torch.nn as nn
 import pytest
+import torch
+
+# 非 CUDA 环境: 跳过整个模块, 连 triton kernel import 都不执行
+if not torch.cuda.is_available():
+    pytest.skip("CUDA not available", allow_module_level=True)
+
+import torch.nn as nn
 from qwen3_from_scratch.kernels.triton.fused.fused_rms_norm_linear import fused_rms_norm_linear_1d
 
 
