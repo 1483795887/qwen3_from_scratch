@@ -21,10 +21,11 @@ class ModelContext:
     cache_position: int = 0
     num_tokens: torch.Tensor = field(default=torch.Tensor)
     is_prefill: bool = True
-    block_tables: torch.Tensor = field(default=torch.Tensor)
+    block_tables: torch.Tensor | None = None
     block_size: int = 16
     cum_seq_lens_q: torch.Tensor = field(default=torch.Tensor)
     cum_seq_lens_kv: torch.Tensor = field(default=torch.Tensor)
+    slot_mapping: torch.Tensor | None = None
 
 
 _CONTEXT = ModelContext()
