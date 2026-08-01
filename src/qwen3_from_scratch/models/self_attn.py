@@ -293,8 +293,8 @@ class FusedSelfAttention(nn.Module):
 class PagedSelfAttention(FusedSelfAttention):
     def __init__(self, config: ModelConfig, name: str, layer_idx: int = 0, **kwargs):
         super().__init__(config, name, layer_idx, **kwargs)
-        from qwen3_from_scratch.models.attn import TorchVarLenPagedAttn
-        self.attn = TorchVarLenPagedAttn(config, layer_idx=layer_idx)
+        from qwen3_from_scratch.models.attn import VarLenPagedAttn
+        self.attn = VarLenPagedAttn(config, layer_idx=layer_idx)
 
     def _forward_pytorch(self, x, residual=None):
         ctx = get_forward_context()

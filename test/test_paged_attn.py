@@ -296,7 +296,7 @@ def test_var_len_paged_attn_prefill(model_config, device):
     max_kv_per_seq = max(seq_lens)
 
     paged_attn = _make_paged_attn(
-        model_config, component_impl="var_len_paged_attn_torch", layer_idx=layer_idx
+        model_config, component_impl="var_len_paged_attn", layer_idx=layer_idx
     ).to(device)
     kv_cache, block_tables = _create_kv_cache(
         model_config, n_seqs, max_kv_per_seq, block_size, layer_idx, device
@@ -353,7 +353,7 @@ def test_var_len_paged_attn_decode(model_config, device):
     total_kv = cum_seq_lens_kv[-1].item()
 
     paged_attn = _make_paged_attn(
-        model_config, component_impl="var_len_paged_attn_torch", layer_idx=layer_idx
+        model_config, component_impl="var_len_paged_attn", layer_idx=layer_idx
     ).to(device)
     kv_cache, block_tables = _create_kv_cache(
         model_config, n_seqs, max_kv_per_seq, block_size, layer_idx, device
