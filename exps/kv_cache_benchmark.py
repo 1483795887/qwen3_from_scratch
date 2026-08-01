@@ -88,7 +88,7 @@ def benchmark_generation(
                     nxt = engine.prefill(idx)
                 else:
                     nxt = engine.step(prev)
-            if nxt == config.eos_token_id:
+            if nxt[0] == config.eos_token_id:
                 break
             end_time = time.perf_counter()
             token_time = end_time - start_time
@@ -125,8 +125,8 @@ def benchmark_generation(
                 context.cache_position = 0
                 logits = engine.model(idx)
             logits = logits[:, -1, :]
-            nxt = sampler(logits)[0, 0].item()
-            if nxt == config.eos_token_id:
+            nxt = sampler(logits)[:, 0].tolist()
+            if nxt[0] == config.eos_token_id:
                 break
             end_time = time.perf_counter()
             token_time = end_time - start_time
@@ -139,7 +139,7 @@ def benchmark_generation(
                 tokens_per_second=1.0 / token_time if token_time > 0 else float('inf'),
                 prefill_time=prefill_time
             ))
-            idx = torch.cat((idx, torch.tensor([[nxt]], device=device)), dim=1)
+            idx = torch.cat((idx, torch.tensor([nxt], device=device)), dim=1)
             if token_id % 10 == 0:
                 if token_id == 0:
                     print(f"  Token {token_id + 1}/{max_new_tokens}, Time: {token_time:.4f}s (prefill), "

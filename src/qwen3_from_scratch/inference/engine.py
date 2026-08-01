@@ -89,8 +89,8 @@ class InferenceEngine:
 
     # ── public API ────────────────────────────────
 
-    def prefill(self, prompt_ids: torch.Tensor) -> int:
-        """处理整个 prompt，建立 KV cache 上下文，返回第一个生成词元。
+    def prefill(self, prompt_ids: torch.Tensor) -> List[int]:
+        """处理整个 prompt，建立 KV cache 上下文，返回第一个生成词元（长度 B 的 list）。
 
         每次调用都会重置 KV cache，适合开始新的生成。
         """
@@ -101,26 +101,26 @@ class InferenceEngine:
         self._context.cache_position = 0
         with torch.no_grad():
             logits = self.model(prompt_ids)
-        logits = logits[:, -1, :]  # [1, vocab]
-        next_ids = self.sampler(logits)  # [1, 1]
+        logits = logits[:, -1, :]  # [B, vocab]
+        next_ids = self.sampler(logits)  # [B, 1]
 
         self._seq_len = prompt_ids.shape[1]
-        return next_ids[0, 0].item()
+        return next_ids[:, 0].tolist()  # length B
 
-    def step(self, token_id: int) -> int:
-        """单步 decode：输入一个词元，输出下一个词元。
+    def step(self, token_ids: List[int]) -> List[int]:
+        """单步 decode：输入 B 个词元，输出 B 个下一个词元。
 
         必须先调用 prefill 建立上下文。
         """
         self._context.cache_position = self._seq_len
-        token_tensor = torch.tensor([[token_id]], device=self.device)
+        token_tensor = torch.tensor([token_ids], device=self.device)  # [B, 1]
         with torch.no_grad():
             logits = self.model(token_tensor)
-        logits = logits[:, -1, :]  # [1, vocab]
-        next_ids = self.sampler(logits)  # [1, 1]
+        logits = logits[:, -1, :]  # [B, vocab]
+        next_ids = self.sampler(logits)  # [B, 1]
 
         self._seq_len += 1
-        return next_ids[0, 0].item()
+        return next_ids[:, 0].tolist()  # length B
 
     def generate_stream(
         self,
@@ -132,17 +132,17 @@ class InferenceEngine:
         eos = self.eos_ids if eos_ids is None else self._normalize_eos(eos_ids)
         ids = self._encode(prompt)
 
-        first_id = self.prefill(ids)
-        if first_id in eos:
+        first_ids = self.prefill(ids)
+        if first_ids[0] in eos:
             return
-        yield self.tokenizer.decode([first_id], skip_special_tokens=False)
+        yield self.tokenizer.decode(first_ids, skip_special_tokens=False)
 
-        cur = first_id
+        cur = first_ids
         for _ in range(max_new_tokens - 1):
             nxt = self.step(cur)
-            if nxt in eos:
+            if nxt[0] in eos:
                 break
-            yield self.tokenizer.decode([nxt], skip_special_tokens=False)
+            yield self.tokenizer.decode(nxt, skip_special_tokens=False)
             cur = nxt
 
     def generate(

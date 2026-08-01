@@ -56,7 +56,7 @@ def benchmark(
                 else:
                     nxt = engine.step(prev)
 
-            if nxt == config.eos_token_id:
+            if nxt[0] == config.eos_token_id:
                 break
 
             torch.cuda.synchronize() if device == "cuda" else None
