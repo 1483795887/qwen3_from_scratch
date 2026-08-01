@@ -11,13 +11,11 @@ import torch
 from tokenizers import Tokenizer
 
 from qwen3_from_scratch.factory.config import load_from_file
-from qwen3_from_scratch.inference.context import ModelContext, set_forward_context
-from qwen3_from_scratch.inference.generate import generate
-from qwen3_from_scratch.inference.kv_cache.pre_allocated_kv_cache import (
-    PreAllocatedKVCache,
+from qwen3_from_scratch.inference.engine import InferenceEngine
+from qwen3_from_scratch.inference.sampler import (
+    GreedySampler,
+    TemperatureSampler,
 )
-from qwen3_from_scratch.models.parameter_loader import ParameterLoader
-from qwen3_from_scratch.models.qwen3 import Qwen3
 from qwen3_from_scratch.utils.env import load_env_file
 
 
@@ -31,14 +29,10 @@ class BenchmarkResult:
 
 
 def setup_model_and_tokenizer(model_path: str):
-    """加载模型和分词器"""
-    loader = ParameterLoader()
-    loader.load(model_path)
+    """加载模型和分词器，返回引擎、config、tokenizer、prompt、inputs"""
     config = load_from_file(model_path + "/config.json")
-    model = Qwen3(config=config)
-    model.load_state(loader)
-    unused_keys = loader.get_unused_keys()
-    assert len(unused_keys) == 0, f"Unused keys: {unused_keys}"
+    engine = InferenceEngine.from_path(model_path, device="cpu", max_len=2048)
+    engine.model.config = config
 
     with open(model_path + "/tokenizer_config.json") as f:
         data = json.load(f)
@@ -46,18 +40,18 @@ def setup_model_and_tokenizer(model_path: str):
         # 使用需要长回答的提示词来测试 KV Cache 性能
         prompt = template.render(
             messages=[{
-                "role": "user", 
+                "role": "user",
                 "content": "请详细介绍人工智能的发展历程、主要应用领域、当前面临的挑战以及未来的发展趋势。请尽可能详细地阐述每个方面，包括具体的技术、案例和观点。"
             }]
         )
-        tokenizer = Tokenizer.from_file(model_path + "/tokenizer.json")
+        tokenizer = engine.tokenizer
         inputs = tokenizer.encode(prompt)
-        
-    return model, config, tokenizer, prompt, inputs
+
+    return engine, config, tokenizer, prompt, inputs
 
 
 def benchmark_generation(
-    model: torch.nn.Module,
+    engine: InferenceEngine,
     config,
     inputs,
     tokenizer,
@@ -67,74 +61,93 @@ def benchmark_generation(
     temperature: float = 0.7,
 ) -> List[BenchmarkResult]:
     """
-     benchmark 生成过程，记录每个 token 的生成时间
+    benchmark 生成过程，记录每个 token 的生成时间。
+
+    use_cache=True 时引擎内部使用 PreAllocatedKVCache；
+    use_cache=False 时关闭 cache（每次全量重新计算）。
     """
+    from qwen3_from_scratch.inference.context import set_forward_context
+    from qwen3_from_scratch.inference.kv_cache.pre_allocated_kv_cache import (
+        PreAllocatedKVCache,
+    )
+    from qwen3_from_scratch.inference.context import ModelContext
+
+    sampler = GreedySampler() if temperature == 0.0 else TemperatureSampler(temperature)
+
     results = []
     cumulative_time = 0.0
-    
-    context = ModelContext()
-    context.use_cache = use_cache
-    context.dtype = torch.bfloat16  # 模型参数本身就是 bf16
-    
+
+    idx = torch.tensor([inputs.ids]).to(device)
+
     if use_cache:
+        # 有 cache：用引擎的 prefill + step
+        for token_id in range(max_new_tokens):
+            start_time = time.perf_counter()
+            with torch.no_grad():
+                if token_id == 0:
+                    nxt = engine.prefill(idx)
+                else:
+                    nxt = engine.step(prev)
+            if nxt == config.eos_token_id:
+                break
+            end_time = time.perf_counter()
+            token_time = end_time - start_time
+            cumulative_time += token_time
+            prefill_time = token_time if token_id == 0 else 0.0
+            results.append(BenchmarkResult(
+                token_id=token_id + 1,
+                token_time=token_time,
+                cumulative_time=cumulative_time,
+                tokens_per_second=1.0 / token_time if token_time > 0 else float('inf'),
+                prefill_time=prefill_time
+            ))
+            prev = nxt
+            if token_id % 10 == 0:
+                if token_id == 0:
+                    print(f"  Token {token_id + 1}/{max_new_tokens}, Time: {token_time:.4f}s (prefill), "
+                          f"Cumulative: {cumulative_time:.4f}s")
+                else:
+                    print(f"  Token {token_id + 1}/{max_new_tokens}, Time: {token_time:.4f}s, "
+                          f"Cumulative: {cumulative_time:.4f}s")
+    else:
+        # 无 cache：每步全量重新计算
+        context = ModelContext()
+        context.use_cache = False
+        context.dtype = torch.bfloat16
         context.kv_cache = PreAllocatedKVCache(
             max_new_tokens + len(inputs.ids), config.num_hidden_layers
         )
-    
-    model = model.to(device)
-    idx = torch.tensor([inputs.ids]).to(device)
-    
-    is_prefill = True
-    
-    for token_id in range(max_new_tokens):
-        start_time = time.perf_counter()
-        
-        with torch.no_grad():
-            set_forward_context(context)
-            if is_prefill or not context.use_cache:
+        set_forward_context(context)
+
+        for token_id in range(max_new_tokens):
+            start_time = time.perf_counter()
+            with torch.no_grad():
                 context.cache_position = 0
-                logits = model(idx)
-                is_prefill = False
-            else:
-                context.cache_position = idx.shape[1] - 1
-                logits = model(idx[:, -1:])
-        
-        logits = logits[:, -1, :]
-        
-        if temperature > 0.0:
-            logits = logits / temperature
-            probs = torch.softmax(logits, dim=-1)
-            idx_next = torch.multinomial(probs, num_samples=1)
-        else:
-            idx_next = torch.argmax(logits, dim=-1, keepdim=True)
-        
-        if idx_next == config.eos_token_id:
-            break
-            
-        idx = torch.cat((idx, idx_next), dim=1)
-        
-        end_time = time.perf_counter()
-        token_time = end_time - start_time
-        cumulative_time += token_time
-        
-        prefill_time = token_time if token_id == 0 else 0.0
-        
-        results.append(BenchmarkResult(
-            token_id=token_id + 1,
-            token_time=token_time,
-            cumulative_time=cumulative_time,
-            tokens_per_second=1.0 / token_time if token_time > 0 else float('inf'),
-            prefill_time=prefill_time
-        ))
-        
-        if token_id % 10 == 0:
-            if token_id == 0:
-                print(f"  Token {token_id + 1}/{max_new_tokens}, Time: {token_time:.4f}s (prefill), "
-                      f"Cumulative: {cumulative_time:.4f}s")
-            else:
-                print(f"  Token {token_id + 1}/{max_new_tokens}, Time: {token_time:.4f}s, "
-                      f"Cumulative: {cumulative_time:.4f}s")
-    
+                logits = engine.model(idx)
+            logits = logits[:, -1, :]
+            nxt = sampler(logits)[0, 0].item()
+            if nxt == config.eos_token_id:
+                break
+            end_time = time.perf_counter()
+            token_time = end_time - start_time
+            cumulative_time += token_time
+            prefill_time = token_time if token_id == 0 else 0.0
+            results.append(BenchmarkResult(
+                token_id=token_id + 1,
+                token_time=token_time,
+                cumulative_time=cumulative_time,
+                tokens_per_second=1.0 / token_time if token_time > 0 else float('inf'),
+                prefill_time=prefill_time
+            ))
+            idx = torch.cat((idx, torch.tensor([[nxt]], device=device)), dim=1)
+            if token_id % 10 == 0:
+                if token_id == 0:
+                    print(f"  Token {token_id + 1}/{max_new_tokens}, Time: {token_time:.4f}s (prefill), "
+                          f"Cumulative: {cumulative_time:.4f}s")
+                else:
+                    print(f"  Token {token_id + 1}/{max_new_tokens}, Time: {token_time:.4f}s, "
+                          f"Cumulative: {cumulative_time:.4f}s")
+
     return results
 
 
@@ -488,7 +501,7 @@ def main():
     print(f"正在加载模型：{model_path}")
     
     # 加载模型
-    model, config, tokenizer, prompt, inputs = setup_model_and_tokenizer(model_path)
+    engine, config, tokenizer, prompt, inputs = setup_model_and_tokenizer(model_path)
     
     print(f"Prompt: {prompt[:100]}...")
     print(f"输入 token 数：{len(inputs.ids)}")
@@ -506,15 +519,15 @@ def main():
     
     print("\nCPU - 开启 KV Cache...")
     cpu_results_cache = benchmark_generation(
-        model, config, inputs, tokenizer,
+        engine, config, inputs, tokenizer,
         use_cache=True,
         max_new_tokens=max_new_tokens_with_cache,
         device="cpu"
     )
-    
+
     print("\nCPU - 关闭 KV Cache...")
     cpu_results_no_cache = benchmark_generation(
-        model, config, inputs, tokenizer,
+        engine, config, inputs, tokenizer,
         use_cache=False,
         max_new_tokens=max_new_tokens_no_cache,
         device="cpu"
@@ -530,15 +543,15 @@ def main():
         
         print("\nGPU - 开启 KV Cache...")
         gpu_results_cache = benchmark_generation(
-            model, config, inputs, tokenizer,
+            engine, config, inputs, tokenizer,
             use_cache=True,
             max_new_tokens=max_new_tokens_gpu_with_cache,
             device="cuda"
         )
-        
+
         print("\nGPU - 关闭 KV Cache...")
         gpu_results_no_cache = benchmark_generation(
-            model, config, inputs, tokenizer,
+            engine, config, inputs, tokenizer,
             use_cache=False,
             max_new_tokens=max_new_tokens_gpu_no_cache,
             device="cuda"
