@@ -7,14 +7,14 @@ import torch
 from tokenizers import Tokenizer
 
 from qwen3_from_scratch.factory.config import load_from_file
-from qwen3_from_scratch.inference.engine import InferenceEngine
+from qwen3_from_scratch.inference.engine import BatchRunner
 from qwen3_from_scratch.inference.sampler import GreedySampler
 from qwen3_from_scratch.utils.env import load_env_file
 
 load_env_file()
 
 
-def warmup(engine: InferenceEngine, num_steps: int = 10):
+def warmup(engine: BatchRunner, num_steps: int = 10):
     """用短输入做若干轮 warmup（贪婪解码，避免随机性干扰）。"""
     greedy = GreedySampler()
     engine.sampler = greedy
@@ -28,7 +28,7 @@ def warmup(engine: InferenceEngine, num_steps: int = 10):
 
 
 def benchmark(
-    engine: InferenceEngine,
+    engine: BatchRunner,
     config,
     prompt_tokens,
     max_new_tokens,
@@ -111,7 +111,7 @@ def main():
 
     config = load_from_file(model_path + "/config.json")
     config.decoder_layer.name = "my_op"
-    engine = InferenceEngine.from_path(
+    engine = BatchRunner.from_path(
         model_path, device=device, max_len=512
     )
     engine.model.config = config

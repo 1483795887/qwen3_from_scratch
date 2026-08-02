@@ -21,6 +21,9 @@ def main():
     ) as prof:
         with record_function("model_infer"):
             context = ModelContext()
+            context.position_ids = torch.arange(
+                0, x.shape[1], dtype=torch.long, device="cuda"
+            ).unsqueeze(0)
             set_forward_context(context)
             model(x)
             mem = torch.cuda.max_memory_allocated() / 1024**2

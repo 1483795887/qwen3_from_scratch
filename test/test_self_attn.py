@@ -7,7 +7,6 @@ from transformers.models.qwen3.modeling_qwen3 import Qwen3Attention
 from qwen3_from_scratch.factory import ComponentFactory
 from qwen3_from_scratch.inference.context import (
     ModelContext,
-    PositionEmbeddings,
     set_forward_context,
 )
 from qwen3_from_scratch.inference.kv_cache.paged_cache import PagedKVCache
@@ -16,6 +15,31 @@ from qwen3_from_scratch.inference.kv_cache.pre_allocated_kv_cache import (
 )
 from qwen3_from_scratch.models.attn import create_causal_attention_mask
 from qwen3_from_scratch.models.parameter_loader import ParameterLoader
+from qwen3_from_scratch.models.rotary import get_rope
+
+
+def _get_cos_sin_for_hf(model_config, position_ids, device, dtype):
+    """从 get_rope 获取 cos/sin，返回 HF apply_rotary_pos_emb 所需的 (cos, sin) 元组。
+
+    HF 期望 (1, S, D) 格式。
+    """
+    rotary = get_rope(
+        model_config.head_dim,
+        model_config.head_dim,
+        model_config.max_position_embeddings,
+        model_config.pos_embed_params["rope_theta"],
+    )
+    pos = position_ids.reshape(-1).to(device)
+    cos_sin = rotary.cos_sin_cache[pos].to(device, dtype)
+    half = cos_sin.shape[-1] // 2
+    cos = torch.cat([cos_sin[..., :half], cos_sin[..., :half]], dim=-1)
+    sin = torch.cat([cos_sin[..., half:], cos_sin[..., half:]], dim=-1)
+    cos = cos.squeeze(1)  # (N, D)
+    sin = sin.squeeze(1)
+    # HF 期望 (1, S, D)
+    cos = cos.unsqueeze(0)
+    sin = sin.unsqueeze(0)
+    return cos, sin
 
 
 @pytest.mark.parametrize("component_type", ["base", "my_op"])
@@ -89,15 +113,14 @@ def test_self_attn_output_close_to_transformers(
         context.position_ids = torch.arange(0, 256).view(1, -1).to(device)
         set_forward_context(context)
         output = self_attn(x)
-        position_embeddings = context.position_embeddings
+        cos_hf, sin_hf = _get_cos_sin_for_hf(
+            model_config, context.position_ids, device, x.dtype
+        )
         attn_mask = create_causal_attention_mask(x.shape[1], x.device, x.dtype)
         off_output, _ = off_self_attn(
             x,
             position_ids=context.position_ids,
-            position_embeddings=(
-                position_embeddings.cos_embed,
-                position_embeddings.sin_embed,
-            ),
+            position_embeddings=(cos_hf, sin_hf),
             attention_mask=attn_mask,
         )
         assert torch.allclose(output, off_output, atol=1e-2)
@@ -139,14 +162,13 @@ def test_self_attn_output_close_to_transformers_with_kv_cache(
         x = torch.randn(2, 1, model_config.hidden_size).to(device)
         set_forward_context(context)
         output = self_attn(x)
-        position_embeddings = context.position_embeddings
+        cos_hf, sin_hf = _get_cos_sin_for_hf(
+            model_config, context.position_ids, device, x.dtype
+        )
         off_output, _ = off_self_attn(
             x,
             position_ids=context.position_ids,
-            position_embeddings=(
-                position_embeddings.cos_embed,
-                position_embeddings.sin_embed,
-            ),
+            position_embeddings=(cos_hf, sin_hf),
             attention_mask=None,
             past_key_values=past_key_values,
         )
@@ -271,7 +293,6 @@ def test_paged_self_attn_var_len_shape(model_config, device):
         use_cache=True,
         kv_cache=kv_cache,
         position_ids=position_ids,
-        position_embeddings=PositionEmbeddings(cos_table, sin_table),
         block_tables=block_tables,
         block_size=block_size,
         cum_seq_lens_q=cum_seq_lens,
@@ -340,7 +361,6 @@ def test_paged_self_attn_var_len_prefill(
         use_cache=True,
         kv_cache=kv_cache,
         position_ids=position_ids,
-        position_embeddings=PositionEmbeddings(cos_table, sin_table),
         block_tables=block_tables,
         block_size=block_size,
         cum_seq_lens_q=cum_seq_lens,
@@ -441,7 +461,6 @@ def test_paged_self_attn_var_len_decode(
         use_cache=True,
         kv_cache=kv_cache,
         position_ids=existing_pos_ids,
-        position_embeddings=PositionEmbeddings(cos_table, sin_table),
         block_tables=block_tables,
         block_size=block_size,
         cum_seq_lens_q=existing_cum,
@@ -466,7 +485,6 @@ def test_paged_self_attn_var_len_decode(
         use_cache=True,
         kv_cache=kv_cache,
         position_ids=new_pos_ids,
-        position_embeddings=PositionEmbeddings(cos_table, sin_table),
         block_tables=block_tables,
         block_size=block_size,
         cum_seq_lens_q=cum_seq_lens_q,

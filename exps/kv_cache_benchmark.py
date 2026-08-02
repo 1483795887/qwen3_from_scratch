@@ -11,7 +11,7 @@ import torch
 from tokenizers import Tokenizer
 
 from qwen3_from_scratch.factory.config import load_from_file
-from qwen3_from_scratch.inference.engine import InferenceEngine
+from qwen3_from_scratch.inference.engine import BatchRunner
 from qwen3_from_scratch.inference.sampler import (
     GreedySampler,
     TemperatureSampler,
@@ -31,7 +31,7 @@ class BenchmarkResult:
 def setup_model_and_tokenizer(model_path: str):
     """加载模型和分词器，返回引擎、config、tokenizer、prompt、inputs"""
     config = load_from_file(model_path + "/config.json")
-    engine = InferenceEngine.from_path(model_path, device="cpu", max_len=2048)
+    engine = BatchRunner.from_path(model_path, device="cpu", max_len=2048)
     engine.model.config = config
 
     with open(model_path + "/tokenizer_config.json") as f:
@@ -51,7 +51,7 @@ def setup_model_and_tokenizer(model_path: str):
 
 
 def benchmark_generation(
-    engine: InferenceEngine,
+    engine: BatchRunner,
     config,
     inputs,
     tokenizer,
