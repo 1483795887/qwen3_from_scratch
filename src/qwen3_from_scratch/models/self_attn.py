@@ -5,9 +5,10 @@ import torch
 from torch import nn
 
 from qwen3_from_scratch.factory import ComponentFactory, ModelConfig
-from qwen3_from_scratch.inference.context import get_forward_context, PositionEmbeddings
+from qwen3_from_scratch.inference.context import get_forward_context
 from qwen3_from_scratch.models.common import assign
 from qwen3_from_scratch.models.parameter_loader import ParameterLoader
+from qwen3_from_scratch.models.rotary import get_rope
 
 
 @ComponentFactory.register("self_attn", "base")
@@ -22,7 +23,7 @@ class SelfAttention(nn.Module):
         self.name = name
         self.layer_idx = layer_idx
         self.config = config
-        self.gqa = ComponentFactory.create("attn", config)
+        self.gqa = ComponentFactory.create("attn", config, layer_idx=layer_idx)
         self.rope = ComponentFactory.create("rope", config)
 
         self.k_proj = nn.Linear(hidden_size, kv_embed_size, bias=False)
@@ -100,20 +101,27 @@ class FusedSelfAttention(nn.Module):
         self.q_norm_weight = nn.Parameter(torch.ones(self.head_dim))
         self.k_norm_weight = nn.Parameter(torch.ones(self.head_dim))
 
-    def _build_rope_embeddings(
-        self, position_ids: torch.Tensor, dtype: torch.dtype
-    ) -> PositionEmbeddings:
-        device = position_ids.device
-        inv_freq = 1.0 / (
-            self.config.pos_embed_params["rope_theta"]
-            ** (
-                torch.arange(0, self.head_dim, 2, device=device).float()
-                / self.head_dim
-            )
-        ).unsqueeze(0)
-        freqs = torch.einsum("bj,bk->bjk", position_ids.float(), inv_freq)
-        emb = torch.cat([freqs, freqs], dim=-1)
-        return PositionEmbeddings(emb.cos().to(dtype), emb.sin().to(dtype))
+    def _get_cos_sin(self, x: torch.Tensor):
+        """从预计算的 RotaryEmbedding 获取 cos/sin，按 position_ids 索引。
+
+        返回 (cos, sin)，各 (N, head_dim)，N = position_ids 的长度。
+        """
+        ctx = get_forward_context()
+        assert ctx.position_ids is not None, "position_ids must be set before forward"
+        rotary = get_rope(
+            self.head_dim,
+            self.head_dim,
+            self.config.max_position_embeddings,
+            self.config.pos_embed_params["rope_theta"],
+        )
+        pos = ctx.position_ids.reshape(-1).to(x.device)
+        cos_sin = rotary.cos_sin_cache[pos].to(x.device, x.dtype)
+        half = cos_sin.shape[-1] // 2
+        cos = torch.cat([cos_sin[..., :half], cos_sin[..., :half]], dim=-1)
+        sin = torch.cat([cos_sin[..., half:], cos_sin[..., half:]], dim=-1)
+        cos = cos.squeeze(1)  # (N, D)
+        sin = sin.squeeze(1)
+        return cos, sin
 
     def _forward_pytorch(self, x, residual=None):
         ctx = get_forward_context()
@@ -122,16 +130,7 @@ class FusedSelfAttention(nn.Module):
         H_kv = self.num_kv_heads
         D = self.head_dim
 
-        if ctx.position_embeddings is None:
-            ctx.position_embeddings = self._build_rope_embeddings(
-                ctx.position_ids, x.dtype
-            )
-
-        cos = ctx.position_embeddings.cos_embed
-        sin = ctx.position_embeddings.sin_embed
-        if cos.dim() == 3:
-            cos = cos[0]
-            sin = sin[0]
+        cos, sin = self._get_cos_sin(x)
 
         q_end = H_q * D
         k_end = q_end + H_kv * D
@@ -190,16 +189,7 @@ class FusedSelfAttention(nn.Module):
         H_kv = self.num_kv_heads
         D = self.head_dim
 
-        if ctx.position_embeddings is None:
-            ctx.position_embeddings = self._build_rope_embeddings(
-                ctx.position_ids, x.dtype
-            )
-
-        cos = ctx.position_embeddings.cos_embed
-        sin = ctx.position_embeddings.sin_embed
-        if cos.dim() == 3:
-            cos = cos[0]
-            sin = sin[0]
+        cos, sin = self._get_cos_sin(x)
 
         total_out = (H_q + 2 * H_kv) * D
         qkv = torch.empty(B, S, total_out, dtype=x.dtype, device=x.device)
@@ -287,3 +277,49 @@ class FusedSelfAttention(nn.Module):
         self.k_norm_weight = assign(
             self.k_norm_weight, loader.get(f"{self.name}.k_norm.weight")
         )
+
+
+@ComponentFactory.register("self_attn", "paged_attn")
+class PagedSelfAttention(FusedSelfAttention):
+    def __init__(self, config: ModelConfig, name: str, layer_idx: int = 0, **kwargs):
+        super().__init__(config, name, layer_idx, **kwargs)
+        from qwen3_from_scratch.models.attn import VarLenPagedAttn
+        self.attn = VarLenPagedAttn(config, layer_idx=layer_idx)
+
+    def _forward_pytorch(self, x, residual=None):
+        ctx = get_forward_context()
+        total_seq_len, hidden_dim = x.shape
+        H_q = self.num_heads
+        H_kv = self.num_kv_heads
+        D = self.head_dim
+
+        cos, sin = self._get_cos_sin(x)
+
+        qkv = torch.nn.functional.linear(x, self.qkv_proj.weight).view((total_seq_len, -1, D))
+        q, k, v = qkv.split([H_q, H_kv, H_kv], dim=1)
+
+        q = torch.nn.functional.rms_norm(q, (D,), self.q_norm_weight, self.eps)
+        k = torch.nn.functional.rms_norm(k, (D,), self.k_norm_weight, self.eps)
+
+        cos_e = cos.unsqueeze(1)
+        sin_e = sin.unsqueeze(1)
+
+        def _rotate_half(x):
+            x1, x2 = x.chunk(2, dim=-1)
+            return torch.cat((-x2, x1), dim=-1)
+
+        q = q * cos_e + _rotate_half(q) * sin_e
+        k = k * cos_e + _rotate_half(k) * sin_e
+
+        ctx.kv_cache.update(k, v, self.layer_idx, ctx.cache_position)
+
+        o = self.attn(q, k, v)
+        o = o.reshape(total_seq_len, -1)
+        o = torch.nn.functional.linear(o, self.o_proj.weight)
+        if residual is not None:
+            o = o + residual
+        return o
+
+    def forward(self, x: torch.Tensor, residual: Optional[torch.Tensor] = None):
+        if not x.is_cuda:
+            return self._forward_pytorch(x, residual)

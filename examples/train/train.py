@@ -88,6 +88,9 @@ def train(data_path: str, save_dir: str = './output'):
             y = y.cuda()
             optimizer.zero_grad()
             context = ModelContext()
+            context.position_ids = torch.arange(
+                0, x.shape[1], dtype=torch.long, device="cuda"
+            ).unsqueeze(0)
             set_forward_context(context)
             pred = model(x.cuda())  # [B, L, V]
             B, L, V = pred.shape

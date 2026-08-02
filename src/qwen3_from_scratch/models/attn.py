@@ -3,6 +3,10 @@ from torch import nn
 from torch.nn.functional import scaled_dot_product_attention
 
 from qwen3_from_scratch.factory import ComponentFactory, ModelConfig
+from qwen3_from_scratch.inference.context import get_forward_context, ModelContext
+import math
+
+from qwen3_from_scratch.inference.kv_cache.paged_cache import PagedKVCache
 
 
 @ComponentFactory.register("attn", "base")
@@ -190,3 +194,179 @@ class MyAttnFlash(MyAttn):
             from qwen3_from_scratch.kernels.triton.attn import flash_attention
             return flash_attention(q,k,v,is_causal=True)
         return self.cpu_forward(q, k, v, is_causal=True)
+
+
+@ComponentFactory.register("attn", "paged_attn_torch")
+class TorchPagedAttn(MyAttn):
+
+    def __init__(self, config: ModelConfig, **kwargs) -> None:
+        super().__init__(config)
+        self.layer_idx: int = kwargs.get("layer_idx")
+
+    def forward(self, q, k, v):
+        """
+        q,k,v 为 BHSD格式
+        KV肯定是最大长度，所以以它为完整的N，Q则为最后M个
+        """
+        context = get_forward_context()
+        assert context.use_cache
+        batch_size, num_heads_q, seq_len_q, hidden_dim = q.shape
+        assert k.shape[-1] == hidden_dim
+        assert k.shape == v.shape
+        _, num_heads_k, seq_len_kv, _ = k.shape
+        assert seq_len_kv >= seq_len_q
+        generated_len = seq_len_kv - seq_len_q
+        assert num_heads_q % num_heads_k == 0
+        groups = num_heads_q // num_heads_k
+
+        TILE_SIZE_N = 32
+        TILE_SIZE_M = 32
+        assert TILE_SIZE_N % context.block_size == 0
+        scale = math.sqrt(1.0 / hidden_dim)
+        batch_size = q.shape[0]
+        output = torch.zeros_like(q)
+        kv_cache = context.kv_cache
+        assert isinstance(context.kv_cache, PagedKVCache)
+        k_cache, v_cache = kv_cache.get(self.layer_idx)
+
+        for b in range(batch_size):
+            for h in range(num_heads_q):
+                h_kv = h // groups
+                for m in range(0, seq_len_q, TILE_SIZE_M):
+                    curr_m_span = min(TILE_SIZE_M, seq_len_q - m)
+                    sub_q = q[b, h, m:m + curr_m_span]
+                    dominator = torch.zeros((curr_m_span, 1), dtype=torch.float32, device=q.device)
+                    max_val = torch.zeros((curr_m_span, 1), dtype=torch.float32, device=q.device) - torch.inf
+                    curr_output = torch.zeros_like(sub_q)
+                    m_idx = torch.arange(m + generated_len,
+                                         m + curr_m_span + generated_len,
+                                         device=q.device, dtype=torch.int32)
+                    for n in range(0, seq_len_kv, TILE_SIZE_N):
+                        curr_n_span = min(TILE_SIZE_N, seq_len_kv - n)
+                        n_idx = torch.arange(n, n + curr_n_span, device=q.device, dtype=torch.int32)
+                        sub_k, sub_v = self._load_kv(b, n, curr_n_span, h_kv, self.n_head_dim, q.device, q.dtype,
+                                                     k_cache, v_cache, kv_cache.page_size,
+                                                     context.block_tables)
+                        attn = sub_q @ sub_k.t() * scale
+                        # 没有 causal 就没有用 KVCache 的必要
+                        attn += torch.where(m_idx[:, None] < n_idx[None, :], -float("inf"), 0.0)
+
+                        curr_max = torch.maximum(torch.max(attn, dim=-1, keepdim=True)[0], max_val)
+                        attn_score = torch.exp(attn - curr_max)
+                        curr_dominator = torch.sum(attn_score, dim=-1, keepdim=True)
+
+                        factor = torch.exp(max_val - curr_max)
+                        dominator = dominator * factor + curr_dominator
+                        curr_output = factor * curr_output + attn_score @ sub_v
+                        max_val = curr_max
+                    output[b, h, m:m + curr_m_span] = curr_output / dominator
+        return output
+
+
+    def _load_kv(self, b: int, n_start: int, n_size: int, h_kv: int, head_dim: int, device: torch.device,
+                 dtype: torch.dtype, k_cache, v_cache, page_size: int, block_tables):
+        k = torch.empty((n_size, head_dim), device=device, dtype=dtype)
+        v = torch.empty((n_size, head_dim), device=device, dtype=dtype)
+
+        num_blocks = (n_size + page_size - 1) // page_size
+        for i in range(num_blocks):
+            block_idx = (n_start // page_size) + i
+            block_id = block_tables[b][block_idx].item()
+            offset = i * page_size
+            size = min(page_size, n_size - offset)
+
+            k[offset: offset + size] = k_cache[block_id, :size, h_kv]
+            v[offset:offset + size] = v_cache[block_id, :size, h_kv]
+
+        return k, v
+
+
+@ComponentFactory.register("attn", "var_len_paged_attn")
+class VarLenPagedAttn(MyAttn):
+
+    def __init__(self, config: ModelConfig, layer_idx:int, **kwargs) -> None:
+        super().__init__(config)
+        self.layer_idx: int = layer_idx
+
+    def forward(self, q, k, v):
+        """
+        q,k,v 为 SHD格式
+        这里HD在一起，和其他的H在前面，S在后面不一样
+        """
+        context = get_forward_context()
+        assert context.use_cache
+        _, num_heads_q, hidden_dim = q.shape
+        assert k.shape[-1] == hidden_dim
+        assert k.shape == v.shape
+        _, num_heads_k,  _ = k.shape
+        assert num_heads_q % num_heads_k == 0
+        groups = num_heads_q // num_heads_k
+
+        TILE_SIZE_N = 32
+        TILE_SIZE_M = 32
+        assert TILE_SIZE_N % context.block_size == 0
+        scale = math.sqrt(1.0 / hidden_dim)
+        assert context.cum_seq_lens_kv.shape == context.cum_seq_lens_q.shape
+        assert context.cum_seq_lens_q.shape[0] > 0
+        num_seqs = context.cum_seq_lens_q.shape[0] - 1
+        output = torch.zeros_like(q)
+        kv_cache = context.kv_cache
+        assert isinstance(context.kv_cache, PagedKVCache)
+        k_cache, v_cache = kv_cache.get(self.layer_idx)
+
+        for b in range(num_seqs):
+            for h in range(num_heads_q):
+                h_kv = h // groups
+                m_start, m_end = int(context.cum_seq_lens_q[b]), int(context.cum_seq_lens_q[b + 1])
+                n_start, n_end = int(context.cum_seq_lens_kv[b]), int(context.cum_seq_lens_kv[b + 1])
+                seq_len_q = m_end - m_start
+                seq_len_kv = n_end - n_start
+                assert seq_len_kv >= seq_len_q
+                generated_len = seq_len_kv - seq_len_q
+                # 采用 [start, end) 的方式
+                for m in range(m_start, m_end, TILE_SIZE_M):
+                    q_idx_start = m - m_start + generated_len
+                    curr_m_span = min(TILE_SIZE_M, m_end - m)
+                    sub_q = q[m:m + curr_m_span, h]
+                    dominator = torch.zeros((curr_m_span, 1), dtype=torch.float32, device=q.device)
+                    max_val = torch.zeros((curr_m_span, 1), dtype=torch.float32, device=q.device) - torch.inf
+                    curr_output = torch.zeros_like(sub_q)
+                    m_idx = torch.arange(q_idx_start, q_idx_start + curr_m_span, device=q.device, dtype=torch.int32)
+                    for n in range(n_start, n_end, TILE_SIZE_N):
+                        kv_idx_start = n - n_start
+                        curr_n_span = min(TILE_SIZE_N, n_end - n)
+                        n_idx = torch.arange(kv_idx_start, kv_idx_start + curr_n_span, device=q.device, dtype=torch.int32)
+                        sub_k, sub_v = self._load_kv(b, kv_idx_start, curr_n_span, h_kv, self.n_head_dim, q.device, q.dtype,
+                                                     k_cache, v_cache, kv_cache.page_size,
+                                                     context.block_tables)
+                        attn = sub_q @ sub_k.t() * scale
+                        # 没有 causal 就没有用 KVCache 的必要
+                        attn += torch.where(m_idx[:, None] < n_idx[None, :], -float("inf"), 0.0)
+
+                        curr_max = torch.maximum(torch.max(attn, dim=-1, keepdim=True)[0], max_val)
+                        attn_score = torch.exp(attn - curr_max)
+                        curr_dominator = torch.sum(attn_score, dim=-1, keepdim=True)
+
+                        factor = torch.exp(max_val - curr_max)
+                        dominator = dominator * factor + curr_dominator
+                        curr_output = factor * curr_output + attn_score @ sub_v
+
+                        max_val = curr_max
+                    output[m:m + curr_m_span, h] = curr_output / dominator
+        return output
+    def _load_kv(self, b: int, n_start: int, n_size: int, h_kv: int, head_dim: int, device: torch.device,
+                 dtype: torch.dtype, k_cache, v_cache, page_size: int, block_tables):
+        k = torch.empty((n_size, head_dim), device=device, dtype=dtype)
+        v = torch.empty((n_size, head_dim), device=device, dtype=dtype)
+
+        num_blocks = (n_size + page_size - 1) // page_size
+        for i in range(num_blocks):
+            block_idx = (n_start // page_size) + i
+            block_id = block_tables[b][block_idx].item()
+            offset = i * page_size
+            size = min(page_size, n_size - offset)
+
+            k[offset: offset + size] = k_cache[block_id, :size, h_kv]
+            v[offset:offset + size] = v_cache[block_id, :size, h_kv]
+
+        return k, v

@@ -1,10 +1,9 @@
 from .context import (
     ModelContext,
-    PositionEmbeddings,
     get_forward_context,
     set_forward_context,
 )
-from .engine import InferenceEngine
+from .engine import BatchRunner
 from .model_loader import ModelLoader
 from .sampler import (
     GreedySampler,
@@ -15,10 +14,9 @@ from .sampler import (
 
 __all__ = [
     "ModelContext",
-    "PositionEmbeddings",
     "set_forward_context",
     "get_forward_context",
-    "InferenceEngine",
+    "BatchRunner",
     "ModelLoader",
     "Sampler",
     "GreedySampler",

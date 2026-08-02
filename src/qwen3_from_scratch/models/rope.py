@@ -2,10 +2,8 @@ import torch
 from torch import nn
 
 from qwen3_from_scratch.factory import ComponentFactory, ModelConfig
-from qwen3_from_scratch.inference.context import (
-    get_forward_context,
-    PositionEmbeddings,
-)
+from qwen3_from_scratch.inference.context import get_forward_context
+from qwen3_from_scratch.models.rotary import get_rope
 
 
 @ComponentFactory.register("rope", "base")
@@ -26,62 +24,56 @@ class PythonRope(nn.Module):
         x1, x2 = x[..., 0::2], x[..., 1::2]
         return torch.cat((-x2, x1), dim=-1)
 
-    def build_cos_sin_embed(
-        self, dtype, position_ids: torch.Tensor
-    ) -> PositionEmbeddings:
-        inv_freq = 1.0 / (
-            self.base_freq
-            ** (
-                torch.arange(
-                    0, self.head_dim, 2, device=position_ids.device
-                ).float()
-                / self.head_dim
-            )
-        ).unsqueeze(0)
-        freqs = torch.einsum("bj,bk->bjk", position_ids, inv_freq)
-        emb = torch.cat([freqs, freqs], dim=-1)
-        return PositionEmbeddings(emb.cos().to(dtype), emb.sin().to(dtype))
+    def _get_cos_sin(self, x: torch.Tensor):
+        """从预计算的 RotaryEmbedding 获取 cos/sin，按 position_ids 索引。
+
+        cos_sin_cache 结构: cat([cos(freqs), sin(freqs)])，各 head_dim//2。
+        需要扩展为 head_dim 维（cat([cos, cos] 和 [sin, sin]），
+        与旧 build_cos_sin_embed 的 cat([freqs, freqs]) 一致。
+        """
+        ctx = get_forward_context()
+        assert ctx.position_ids is not None, "position_ids must be set before forward"
+        rotary = get_rope(
+            self.head_dim, self.head_dim, self.max_seq_len, self.base_freq
+        )
+        pos = ctx.position_ids.reshape(-1).to(x.device)
+        cos_sin = rotary.cos_sin_cache[pos].to(x.device, x.dtype)
+        half = cos_sin.shape[-1] // 2
+        cos = torch.cat([cos_sin[..., :half], cos_sin[..., :half]], dim=-1)
+        sin = torch.cat([cos_sin[..., half:], cos_sin[..., half:]], dim=-1)
+        # cos_sin_cache 多了 unsqueeze(1) 的中间维度，squeeze 掉
+        cos = cos.squeeze(1)  # (N, head_dim)
+        sin = sin.squeeze(1)
+        return cos, sin
 
     def forward(self, x: torch.Tensor):
-        ctx = get_forward_context()
-        seq_len = x.shape[2]
+        cos, sin = self._get_cos_sin(x)
 
-        if ctx.position_ids is None:
-            ctx.position_ids = torch.arange(
-                seq_len, device=x.device
-            ).unsqueeze(0)
-        if ctx.position_embeddings is None:
-            ctx.position_embeddings = self.build_cos_sin_embed(
-                x, ctx.position_ids
-            )
-        emb_cos = ctx.position_embeddings.cos_embed[None, :, :]
-        emb_sin = ctx.position_embeddings.sin_embed[None, :, :]
+        if x.dim() == 4:  # BHSD: (B, H, S, D)
+            cos_e = cos[None, None, :, :]
+            sin_e = sin[None, None, :, :]
+        elif x.dim() == 3:  # SHD: (T, H, D)
+            cos_e = cos[:, None, :]
+            sin_e = sin[:, None, :]
+        else:
+            raise ValueError(f"Unexpected x.dim()={x.dim()}, expected 3 or 4")
 
-        # NeoX风格旋转
         if self.rope_type == "neox":
-            return (x * emb_cos) + (self._rotate_half_neox(x) * emb_sin)
+            return (x * cos_e) + (self._rotate_half_neox(x) * sin_e)
         elif self.rope_type == "normal":
-            return (x * emb_cos) + (self._rotate_normal(x) * emb_sin)
+            return (x * cos_e) + (self._rotate_normal(x) * sin_e)
         else:
             raise ValueError(f"Unknown RoPE type: {self.rope_type}")
 
+
 @ComponentFactory.register("rope", "my_op")
 class MyRope(PythonRope):
-  def forward(self, x: torch.Tensor):
-    ctx = get_forward_context()
-    if self.rope_type == "normal" or not x.is_cuda:
-      return super().forward(x)
-    seq_len = x.shape[2]
+    def forward(self, x: torch.Tensor):
+        if self.rope_type == "normal" or not x.is_cuda:
+            return super().forward(x)
 
-    if ctx.position_ids is None:
-        ctx.position_ids = torch.arange(
-            seq_len, device=x.device
-        ).unsqueeze(0)
-    if ctx.position_embeddings is None:
-        ctx.position_embeddings = self.build_cos_sin_embed(
-            x, ctx.position_ids
-        )
-    emb_cos = ctx.position_embeddings.cos_embed[None, :, :]
-    emb_sin = ctx.position_embeddings.sin_embed[None, :, :]
-    from qwen3_from_scratch.kernels.triton.rope import neox_rope
-    return neox_rope(x, emb_cos, emb_sin)
+        cos, sin = self._get_cos_sin(x)
+        cos_e = cos[None, None, :, :]
+        sin_e = sin[None, None, :, :]
+        from qwen3_from_scratch.kernels.triton.rope import neox_rope
+        return neox_rope(x, cos_e, sin_e)

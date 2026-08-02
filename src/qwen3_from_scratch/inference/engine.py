@@ -21,8 +21,8 @@ from qwen3_from_scratch.inference.sampler import (
 )
 
 
-class InferenceEngine:
-    """通用推理引擎。
+class BatchRunner:
+    """单请求 Batch 推理引擎。
 
     提供三种推理模式：
       - generate(prompt)          → str           同步，返回完整文本
@@ -64,7 +64,7 @@ class InferenceEngine:
         device: str = "cpu",
         sampler: Optional[Sampler] = None,
         max_len: int = 2048,
-    ) -> "InferenceEngine":
+    ) -> "BatchRunner":
         """从模型路径一键构建引擎。
 
         自动加载 model / tokenizer / chat_template / generation_config。
@@ -99,6 +99,9 @@ class InferenceEngine:
 
         prompt_ids = prompt_ids.to(self.device)
         self._context.cache_position = 0
+        self._context.position_ids = torch.arange(
+            0, prompt_ids.shape[1], dtype=torch.long, device=self.device
+        ).unsqueeze(0)
         with torch.no_grad():
             logits = self.model(prompt_ids)
         logits = logits[:, -1, :]  # [B, vocab]
@@ -113,6 +116,9 @@ class InferenceEngine:
         必须先调用 prefill 建立上下文。
         """
         self._context.cache_position = self._seq_len
+        self._context.position_ids = torch.arange(
+            self._seq_len, self._seq_len + 1, dtype=torch.long, device=self.device
+        ).unsqueeze(0)
         token_tensor = torch.tensor([token_ids], device=self.device)  # [B, 1]
         with torch.no_grad():
             logits = self.model(token_tensor)
