@@ -106,7 +106,7 @@ def gemm_kernel(
       # beta为0也不能解决nan*0=nan这个问题
       acc = alpha * acc
     if activation_fc == ACTIVATION_SILU:
-      acc = acc * tl.sigmod(acc)
+      acc = acc * tl.sigmoid(acc)
     tl.store(d_ptr, acc.to(dtype), boundary_check=(0, 1))
 
 
@@ -142,7 +142,7 @@ def gemm(
     assert Ha == c.shape[1] == d.shape[1], f"Feature dimension mismatch: {c.shape[1]} vs {d.shape[1]}"
     assert Ha % Hb == 0
     
-    BLOCK_SIZE_M = 128 if M > 1 else 1
+    BLOCK_SIZE_M = 128
     BLOCK_SIZE_N = 128
     BLOCK_SIZE_D = 32 if b.dtype == torch.float32 else 64
     

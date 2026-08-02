@@ -228,7 +228,7 @@ def flash_attention(Q: torch.Tensor, K: torch.Tensor, V: torch.Tensor, is_causal
     output = torch.empty_like(Q)
 
     scale = 1.0 / (D**0.5) * math.log2(math.e)
-    BLOCK_SIZE_M = 32 if M > 1 else 1
+    BLOCK_SIZE_M = 32
     BLOCK_SIZE_N = 32
     BLOCK_SIZE_K = triton.next_power_of_2(max(D, 16))
     grid = (triton.cdiv(M, BLOCK_SIZE_M), Hq , B)

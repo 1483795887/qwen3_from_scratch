@@ -49,7 +49,8 @@ class RotaryEmbedding(nn.Module):
         query: torch.Tensor,
         key: torch.Tensor,
     ) -> tuple[torch.Tensor, torch.Tensor]:
-        cos_sin = self.cos_sin_cache[positions]
+        pos = positions.cpu()
+        cos_sin = self.cos_sin_cache[pos].to(query.device, query.dtype)
         cos, sin = cos_sin.chunk(2, dim=-1)
         query = apply_rotary_emb(query, cos, sin)
         key = apply_rotary_emb(key, cos, sin)

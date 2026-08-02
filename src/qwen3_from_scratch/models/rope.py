@@ -36,7 +36,7 @@ class PythonRope(nn.Module):
         rotary = get_rope(
             self.head_dim, self.head_dim, self.max_seq_len, self.base_freq
         )
-        pos = ctx.position_ids.reshape(-1).to(x.device)
+        pos = ctx.position_ids.reshape(-1).cpu()
         cos_sin = rotary.cos_sin_cache[pos].to(x.device, x.dtype)
         half = cos_sin.shape[-1] // 2
         cos = torch.cat([cos_sin[..., :half], cos_sin[..., :half]], dim=-1)

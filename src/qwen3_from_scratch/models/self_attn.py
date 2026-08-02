@@ -114,7 +114,7 @@ class FusedSelfAttention(nn.Module):
             self.config.max_position_embeddings,
             self.config.pos_embed_params["rope_theta"],
         )
-        pos = ctx.position_ids.reshape(-1).to(x.device)
+        pos = ctx.position_ids.reshape(-1).cpu()
         cos_sin = rotary.cos_sin_cache[pos].to(x.device, x.dtype)
         half = cos_sin.shape[-1] // 2
         cos = torch.cat([cos_sin[..., :half], cos_sin[..., :half]], dim=-1)

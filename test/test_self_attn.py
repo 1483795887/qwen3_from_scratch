@@ -29,7 +29,7 @@ def _get_cos_sin_for_hf(model_config, position_ids, device, dtype):
         model_config.max_position_embeddings,
         model_config.pos_embed_params["rope_theta"],
     )
-    pos = position_ids.reshape(-1).to(device)
+    pos = position_ids.reshape(-1).cpu()
     cos_sin = rotary.cos_sin_cache[pos].to(device, dtype)
     half = cos_sin.shape[-1] // 2
     cos = torch.cat([cos_sin[..., :half], cos_sin[..., :half]], dim=-1)
