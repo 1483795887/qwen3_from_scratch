@@ -2,6 +2,8 @@ import json
 from dataclasses import dataclass, field
 from typing import Any, Dict, Literal, Union
 
+from transformers import Qwen3Config
+
 ACTIVATIONS = Literal["silu"]
 NORM_TYPE = Literal["rms_norm"]
 POS_EMBED_TYPE = Literal["rope"]
@@ -52,6 +54,26 @@ class ModelConfig:
     decoder_layer: ComponentConfig = field(
         default_factory=lambda: ComponentConfig("base")
     )
+
+    def to_transformers_config(self) -> Qwen3Config:
+        """转换为 transformers Qwen3Config，保证与 ModelConfig 一一对应。"""
+        return Qwen3Config(
+            vocab_size=self.vocab_size,
+            hidden_size=self.hidden_size,
+            hidden_act=self.hidden_act,
+            num_hidden_layers=self.num_hidden_layers,
+            max_position_embeddings=self.max_position_embeddings,
+            eos_token_id=self.eos_token_id,
+            num_key_value_heads=self.num_key_value_heads,
+            num_attention_heads=self.num_attention_heads,
+            head_dim=self.head_dim,
+            intermediate_size=self.intermediate_size,
+            rms_norm_eps=self.norm_params["eps"],
+            rope_parameters={
+                "rope_theta": self.pos_embed_params["rope_theta"],
+                "rope_type": "default",
+            },
+        )
 
 
 @dataclass

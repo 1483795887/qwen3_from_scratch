@@ -14,7 +14,6 @@ from qwen3_from_scratch.inference.kv_cache.pre_allocated_kv_cache import (
     PreAllocatedKVCache,
 )
 from qwen3_from_scratch.models.attn import create_causal_attention_mask
-from qwen3_from_scratch.models.parameter_loader import ParameterLoader
 from qwen3_from_scratch.models.rotary import get_rope
 
 
@@ -43,18 +42,14 @@ def _get_cos_sin_for_hf(model_config, position_ids, device, dtype):
 
 
 @pytest.mark.parametrize("component_type", ["base", "my_op"])
-def test_self_attn_shape_correct(
-    model_config, model_path, component_type, device
-):
-    loader = ParameterLoader()
-    loader.load(model_path)
+def test_self_attn_shape_correct(model_config, component_type, device):
     self_attn = ComponentFactory.create(
         "self_attn",
         model_config,
-        name="model.layers.8.self_attn",
+        name="",
         component_impl=component_type,
     ).to(device)
-    self_attn.load_state(loader)
+    self_attn = self_attn.to(torch.bfloat16)
     n_seq = 256
     x = torch.randn(
         2, n_seq, model_config.hidden_size, dtype=torch.bfloat16
@@ -98,7 +93,7 @@ def test_self_attn_shape_correct_with_kv_cache(
 
 @pytest.mark.parametrize("component_type", ["base", "my_op"])
 def test_self_attn_output_close_to_transformers(
-    model_config, model_path, qwen3_config, component_type, device
+    model_config, qwen3_config, component_type, device
 ):
     self_attn = ComponentFactory.create(
         "self_attn", model_config, name="", component_impl=component_type
@@ -128,7 +123,7 @@ def test_self_attn_output_close_to_transformers(
 
 @pytest.mark.parametrize("component_type", ["base", "my_op"])
 def test_self_attn_output_close_to_transformers_with_kv_cache(
-    model_config, model_path, qwen3_config, component_type, device
+    model_config, qwen3_config, component_type, device
 ):
     self_attn = ComponentFactory.create(
         "self_attn",
@@ -306,7 +301,7 @@ def test_paged_self_attn_var_len_shape(model_config, device):
 
 
 def test_paged_self_attn_var_len_prefill(
-    model_config, model_path, qwen3_config, device
+    model_config, qwen3_config, device
 ):
     """PagedSelfAttention 变长 prefill: 2 条不同长度序列 [4, 8]，对比 HF 参考实现。"""
     if device == "cuda":
@@ -315,17 +310,14 @@ def test_paged_self_attn_var_len_prefill(
     layer_idx = 0
     block_size = 16
 
-    loader = ParameterLoader()
-    loader.load(model_path)
     paged_attn = ComponentFactory.create(
         "self_attn",
         model_config,
-        name="model.layers.8.self_attn",
+        name="",
         layer_idx=layer_idx,
         component_impl="paged_attn",
     ).to(device)
-    paged_attn.load_state(loader)
-    paged_attn = paged_attn.float()
+    paged_attn = paged_attn.to(torch.bfloat16).float()
 
     off_self_attn = Qwen3Attention(qwen3_config, layer_idx=layer_idx).to(device)
     off_self_attn.load_state_dict(paged_attn.state_dict())
@@ -395,7 +387,7 @@ def test_paged_self_attn_var_len_prefill(
 
 
 def test_paged_self_attn_var_len_decode(
-    model_config, model_path, qwen3_config, device
+    model_config, qwen3_config, device
 ):
     """PagedSelfAttention 变长 decode: 2 条序列 (已有 KV 16/32)，各生成 1 个新 token。
 
@@ -410,17 +402,14 @@ def test_paged_self_attn_var_len_decode(
     layer_idx = 0
     block_size = 16
 
-    loader = ParameterLoader()
-    loader.load(model_path)
     paged_attn = ComponentFactory.create(
         "self_attn",
         model_config,
-        name="model.layers.8.self_attn",
+        name="",
         layer_idx=layer_idx,
         component_impl="paged_attn",
     ).to(device)
-    paged_attn.load_state(loader)
-    paged_attn = paged_attn.float()
+    paged_attn = paged_attn.to(torch.bfloat16).float()
 
     off_self_attn = Qwen3Attention(qwen3_config, layer_idx=layer_idx).to(device)
     off_self_attn.load_state_dict(paged_attn.state_dict())
@@ -428,7 +417,7 @@ def test_paged_self_attn_var_len_decode(
     existing_lens = [16, 32]
     n_seqs = len(existing_lens)
     total_existing = sum(existing_lens)
-    total_kv_lens = [l + 1 for l in existing_lens]  # [17, 33]
+    total_kv_lens = [n + 1 for n in existing_lens]  # [17, 33]
     max_total_kv = max(total_kv_lens)
 
     rope_theta = model_config.pos_embed_params["rope_theta"]

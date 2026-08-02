@@ -7,12 +7,12 @@ from qwen3_from_scratch.models.parameter_loader import ParameterLoader
 
 
 @pytest.mark.parametrize("component_type", ["base", "my_op"])
-def test_ffn_load(model_path, model_config, component_type, device):
+def test_ffn_load(real_model_path, real_model_config, component_type, device):
     loader = ParameterLoader()
-    loader.load(model_path)
+    loader.load(real_model_path)
     ffn = ComponentFactory.create(
         "mlp",
-        model_config,
+        real_model_config,
         name="model.layers.7.mlp",
         component_impl=component_type,
     ).to(device)

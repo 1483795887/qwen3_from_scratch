@@ -5,27 +5,38 @@ os.environ["TRITON_IEEE_PRECISION"] = "1"
 os.environ["TRITON_F32_DEFAULT"] = "ieee"
 import pytest
 import torch
-from transformers import Qwen3Config
 
 from qwen3_from_scratch.factory import load_from_file
+from qwen3_from_scratch.factory.config import ModelConfig
 from qwen3_from_scratch.utils.env import load_env_file
 
 
 @pytest.fixture()
-def model_path():
+def model_config() -> ModelConfig:
+    """预置 ModelConfig，不依赖本地模型文件。"""
+    return ModelConfig()
+
+
+@pytest.fixture()
+def qwen3_config(model_config):
+    """与 model_config 对应的 transformers Qwen3Config。"""
+    return model_config.to_transformers_config()
+
+
+@pytest.fixture()
+def real_model_path():
+    """真实模型权重路径。未设置 MODEL_PATH 时跳过依赖真实权重的用例。"""
     load_env_file()
-    return os.environ.get("MODEL_PATH")
+    path = os.environ.get("MODEL_PATH")
+    if not path:
+        pytest.skip("MODEL_PATH 未设置：跳过真实模型权重用例")
+    return path
 
 
 @pytest.fixture()
-def model_config(model_path):
-    model_path = os.environ.get("MODEL_PATH")
-    return load_from_file(model_path + "/config.json")
-
-
-@pytest.fixture()
-def qwen3_config(model_path):
-    return Qwen3Config.from_pretrained(model_path)
+def real_model_config(real_model_path):
+    """真实模型的配置，从 real_model_path/config.json 读取。"""
+    return load_from_file(os.path.join(real_model_path, "config.json"))
 
 def pytest_runtest_call(item):
     """

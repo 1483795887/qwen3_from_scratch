@@ -1,31 +1,28 @@
 import pytest
 import torch
 from transformers.models.qwen3.modeling_qwen3 import (
-    Qwen3Config,
     Qwen3DecoderLayer,
     Qwen3RotaryEmbedding,
 )
 
 from qwen3_from_scratch.factory import ComponentFactory
-from qwen3_from_scratch.inference.context import ModelContext, set_forward_context
+from qwen3_from_scratch.inference.context import (
+    ModelContext,
+    set_forward_context,
+)
 from qwen3_from_scratch.models.attn import create_causal_attention_mask
-from qwen3_from_scratch.models.parameter_loader import ParameterLoader
 
 
 @pytest.mark.parametrize("component_type", ["base", "my_op"])
-def test_transformer_block_shape_correct(
-    model_config, model_path, component_type, device
-):
-    loader = ParameterLoader()
-    loader.load(model_path)
+def test_transformer_block_shape_correct(model_config, component_type, device):
     transformer_block = ComponentFactory.create(
         "decoder_layer",
         model_config,
-        name="model.layers.8",
+        name="",
         layer_idx=8,
         component_impl=component_type,
     ).to(device)
-    transformer_block.load_state(loader)
+    transformer_block = transformer_block.to(torch.bfloat16)
     n_seq = 256
     x = torch.randn(
         2, n_seq, model_config.hidden_size, dtype=torch.bfloat16
@@ -40,7 +37,7 @@ def test_transformer_block_shape_correct(
 
 @pytest.mark.parametrize("component_type", ["base", "my_op"])
 def test_transformer_block_output_close_to_transformers(
-    model_config, model_path, component_type, device
+    model_config, qwen3_config, component_type, device
 ):
     transformer_block = ComponentFactory.create(
         "decoder_layer",
@@ -49,7 +46,6 @@ def test_transformer_block_output_close_to_transformers(
         layer_idx=8,
         component_impl=component_type,
     ).to(device)
-    qwen3_config = Qwen3Config.from_pretrained(model_path)
     hf_decoder_layer = Qwen3DecoderLayer(qwen3_config, layer_idx=8).to(device)
     hf_rotary_embed = Qwen3RotaryEmbedding(config=qwen3_config).to(device)
 
