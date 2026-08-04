@@ -57,7 +57,6 @@ class ModelConfig:
 @dataclass
 class GenerationConfig:
     bos_token_id: int = 151643
-    eos_token_id: Union[int, list[int]] = 151645
     pad_token_id: int = 151643
     temperature: float = 1.0
     top_k: int = 0
@@ -70,7 +69,6 @@ class GenerationConfig:
             data = json.load(file)
             return cls(
                 bos_token_id=data.get("bos_token_id", 151643),
-                eos_token_id=data.get("eos_token_id", 151645),
                 pad_token_id=data.get("pad_token_id", 151643),
                 temperature=data.get("temperature", 1.0),
                 top_k=data.get("top_k", 0),
@@ -88,7 +86,6 @@ def load_from_file(file_path: str):
             hidden_act=data["hidden_act"],
             num_hidden_layers=data["num_hidden_layers"],
             max_position_embeddings=data["max_position_embeddings"],
-            eos_token_id=data["eos_token_id"],
             num_key_value_heads=data["num_key_value_heads"],
             num_attention_heads=data["num_attention_heads"],
             head_dim=data["head_dim"],

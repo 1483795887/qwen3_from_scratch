@@ -1,11 +1,10 @@
-import json
 import os
 from typing import Collection, Dict, Iterator, List, Optional, Union
 
 import jinja2
 import torch
 import torch.nn as nn
-from tokenizers import Tokenizer
+from transformers import AutoTokenizer, PreTrainedTokenizer
 
 from qwen3_from_scratch.factory.config import ComponentConfig, GenerationConfig
 from qwen3_from_scratch.inference.context import ModelContext, set_forward_context
@@ -36,7 +35,7 @@ class BatchRunner:
     def __init__(
         self,
         model: nn.Module,
-        tokenizer: Tokenizer,
+        tokenizer: PreTrainedTokenizer,
         sampler: Sampler,
         max_len: int = 2048,
         chat_template: Optional[str] = None,
@@ -72,8 +71,7 @@ class BatchRunner:
         如果不传 sampler，则根据 gen_config 自动选择。
         """
         model = ModelLoader.load(model_path, device, components=components)
-        tokenizer = Tokenizer.from_file(os.path.join(model_path, "tokenizer.json"))
-        chat_template = _load_chat_template(model_path)
+        tokenizer = AutoTokenizer.from_pretrained(model_path)
         gen_config = GenerationConfig.load_from_file(
             os.path.join(model_path, "generation_config.json")
         )
@@ -84,8 +82,8 @@ class BatchRunner:
             tokenizer=tokenizer,
             sampler=sampler,
             max_len=max_len,
-            chat_template=chat_template,
-            eos_ids=gen_config.eos_token_id,
+            chat_template=tokenizer.chat_template,
+            eos_ids=tokenizer.eos_token_id,
         )
 
     # ── public API ────────────────────────────────
@@ -189,8 +187,7 @@ class BatchRunner:
             raise TypeError(
                 f"prompt must be str or list[dict], got {type(prompt)}"
             )
-        ids = self.tokenizer.encode(text)
-        return torch.tensor([ids.ids])
+        return torch.tensor([self.tokenizer.encode(text)])
 
     def _apply_chat_template(self, messages: List[Dict[str, str]]) -> str:
         """用 jinja2 渲染 chat template，无 template 时简单拼接。"""
@@ -212,15 +209,6 @@ class BatchRunner:
 
 
 # ── 模块级辅助函数 ───────────────────────────────
-
-
-def _load_chat_template(model_path: str) -> Optional[str]:
-    """从 tokenizer_config.json 读取 chat_template 字段。"""
-    path = os.path.join(model_path, "tokenizer_config.json")
-    if os.path.exists(path):
-        with open(path, "r", encoding="utf-8") as f:
-            return json.load(f).get("chat_template", None)
-    return None
 
 
 def _sampler_from_gen_config(gen_config: GenerationConfig) -> Sampler:
