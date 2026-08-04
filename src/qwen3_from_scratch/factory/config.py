@@ -22,11 +22,14 @@ class ModelConfig:
     num_hidden_layers: int = 28
     max_position_embeddings: int = 40960
     eos_token_id: int = 151645
+    tie_word_embeddings: bool = False
 
     num_key_value_heads: int = 8
     num_attention_heads: int = 16
     head_dim: int = 128
     intermediate_size: int = 4096
+    num_experts:int = 0
+    num_experts_per_token: int = 0
 
     norm_type: NORM_TYPE = "rms_norm"
     norm_params: dict = field(default_factory=lambda :{"eps": 1e-5})
@@ -97,4 +100,7 @@ def load_from_file(file_path: str):
                 "rope_theta": data["rope_theta"],
                 "rope_type": "neox",
             },
+            num_experts=data.get("num_experts", 0),
+            num_experts_per_token=data.get("num_experts_per_tok", 0),
+            tie_word_embeddings=data.get("tie_word_embeddings", False),
         )
