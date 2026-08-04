@@ -7,7 +7,7 @@ import torch
 import torch.nn as nn
 from tokenizers import Tokenizer
 
-from qwen3_from_scratch.factory.config import GenerationConfig
+from qwen3_from_scratch.factory.config import ComponentConfig, GenerationConfig
 from qwen3_from_scratch.inference.context import ModelContext, set_forward_context
 from qwen3_from_scratch.inference.kv_cache.pre_allocated_kv_cache import (
     PreAllocatedKVCache,
@@ -64,13 +64,14 @@ class BatchRunner:
         device: str = "cpu",
         sampler: Optional[Sampler] = None,
         max_len: int = 2048,
+        components: Optional[Dict[str, ComponentConfig]] = None,
     ) -> "BatchRunner":
         """从模型路径一键构建引擎。
 
         自动加载 model / tokenizer / chat_template / generation_config。
         如果不传 sampler，则根据 gen_config 自动选择。
         """
-        model = ModelLoader.load(model_path, device)
+        model = ModelLoader.load(model_path, device, components=components)
         tokenizer = Tokenizer.from_file(os.path.join(model_path, "tokenizer.json"))
         chat_template = _load_chat_template(model_path)
         gen_config = GenerationConfig.load_from_file(
