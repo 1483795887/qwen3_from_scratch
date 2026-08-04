@@ -55,6 +55,18 @@ _Avoid_: PythonRope, MyRope（这些是 apply 逻辑的包装，不是预计算�
 **get_rope**:
 `lru_cache` 装饰的工厂函数。相同参数只创建一个 `RotaryEmbedding` 实例，全局共享。所有 RoPE 消费者（`PythonRope`、`MyRope`、`FusedSelfAttention`、`PagedSelfAttention`）通过它获取预计算 buffer。
 
+### 组件配置
+
+**ComponentConfig**:
+组件实现的运行时加载决策。由 `name`（注册名，如 `"base"`/`"my_op"`）和 `kwargs`（实现特定参数）组成。`ModelConfig` 持有 6 个 `ComponentConfig` 字段（`self_attn`/`mlp`/`norm`/`attn`/`rope`/`decoder_layer`），默认全 `"base"`（HuggingFace 兼容）。
+组件覆写发生在 `ModelLoader.load` 的 API 层，叠加在从 `config.json` 读出的架构参数之上——`config.json` 只存架构参数（dims/layers/heads），不存组件实现选择。
+`ModelLoader.load` 接受 `components: Optional[Dict[str, ComponentConfig]]`，逐字段覆盖 `load_from_file` 读出的默认值，并对字段名和实现名做严格校验（fail fast）。
+组件默认值当前为 "base"。ADR 0001 要求 BatchRunner 使用 `FusedSelfAttention`（注册名 `"my_op"`），该默认值待未来配置文件机制落地后切换。
+_Avoid_: 组件实现持久化进 config.json（架构参数与组件实现分离）
+
+**ComponentFactory**:
+组件注册表 + 工厂。`@register(component_type, name)` 装饰器注册实现类，`create(component_type, config, ...)` 按 `ComponentConfig.name` 查表实例化。是 `ComponentConfig` 的实现机制，不是领域概念。
+
 ### 核心原则
 
 **模型纯计算**:

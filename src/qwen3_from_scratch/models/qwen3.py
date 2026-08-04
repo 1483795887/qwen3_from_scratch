@@ -1,4 +1,5 @@
 import torch
+import torch.nn.functional as F
 from torch import nn
 
 from qwen3_from_scratch.factory import ComponentFactory, ModelConfig
@@ -17,9 +18,12 @@ class Qwen3(nn.Module):
         self.tok_embd = nn.Embedding(
             config.vocab_size, config.hidden_size, padding_idx=None
         )
-        self.output_head = nn.Linear(
-            config.hidden_size, config.vocab_size, bias=False
-        )
+        if config.tie_word_embeddings:
+            self.output_head = None
+        else:
+            self.output_head = nn.Linear(
+                config.hidden_size, config.vocab_size, bias=False
+            )
         self.final_norm = ComponentFactory.create(
             "norm", config=config, dim=config.hidden_size, name="model.norm"
         )
@@ -42,9 +46,10 @@ class Qwen3(nn.Module):
         self.tok_embd.weight = assign(
             self.tok_embd.weight, loader.get("model.embed_tokens.weight")
         )
-        self.output_head.weight = assign(
-            self.output_head.weight, loader.get("lm_head.weight")
-        )
+        if self.output_head is not None:
+            self.output_head.weight = assign(
+                self.output_head.weight, loader.get("lm_head.weight")
+            )
 
     def forward(self, idx: torch.Tensor):
         tok_embd = self.tok_embd(idx)
@@ -52,5 +57,8 @@ class Qwen3(nn.Module):
         for layer in self.trf_blocks:
             x = layer(x)
         x = self.final_norm(x)
-        logits = self.output_head(x)
+        if self.output_head is not None:
+            logits = self.output_head(x)
+        else:
+            logits = F.linear(x, self.tok_embd.weight)
         return logits

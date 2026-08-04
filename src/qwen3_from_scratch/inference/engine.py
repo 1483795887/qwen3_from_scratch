@@ -1,13 +1,12 @@
-import json
 import os
 from typing import Collection, Dict, Iterator, List, Optional, Union
 
 import jinja2
 import torch
 import torch.nn as nn
-from tokenizers import Tokenizer
+from transformers import AutoTokenizer, PreTrainedTokenizer
 
-from qwen3_from_scratch.factory.config import GenerationConfig
+from qwen3_from_scratch.factory.config import ComponentConfig, GenerationConfig
 from qwen3_from_scratch.inference.context import ModelContext, set_forward_context
 from qwen3_from_scratch.inference.kv_cache.pre_allocated_kv_cache import (
     PreAllocatedKVCache,
@@ -36,7 +35,7 @@ class BatchRunner:
     def __init__(
         self,
         model: nn.Module,
-        tokenizer: Tokenizer,
+        tokenizer: PreTrainedTokenizer,
         sampler: Sampler,
         max_len: int = 2048,
         chat_template: Optional[str] = None,
@@ -64,15 +63,15 @@ class BatchRunner:
         device: str = "cpu",
         sampler: Optional[Sampler] = None,
         max_len: int = 2048,
+        components: Optional[Dict[str, ComponentConfig]] = None,
     ) -> "BatchRunner":
         """从模型路径一键构建引擎。
 
         自动加载 model / tokenizer / chat_template / generation_config。
         如果不传 sampler，则根据 gen_config 自动选择。
         """
-        model = ModelLoader.load(model_path, device)
-        tokenizer = Tokenizer.from_file(os.path.join(model_path, "tokenizer.json"))
-        chat_template = _load_chat_template(model_path)
+        model = ModelLoader.load(model_path, device, components=components)
+        tokenizer = AutoTokenizer.from_pretrained(model_path)
         gen_config = GenerationConfig.load_from_file(
             os.path.join(model_path, "generation_config.json")
         )
@@ -83,8 +82,8 @@ class BatchRunner:
             tokenizer=tokenizer,
             sampler=sampler,
             max_len=max_len,
-            chat_template=chat_template,
-            eos_ids=gen_config.eos_token_id,
+            chat_template=tokenizer.chat_template,
+            eos_ids=tokenizer.eos_token_id,
         )
 
     # ── public API ────────────────────────────────
@@ -110,7 +109,7 @@ class BatchRunner:
         self._seq_len = prompt_ids.shape[1]
         return next_ids[:, 0].tolist()  # length B
 
-    def step(self, token_ids: List[int]) -> List[int]:
+    def step(self, token_ids: List[int], sampler: Optional[Sampler] = None) -> List[int]:
         """单步 decode：输入 B 个词元，输出 B 个下一个词元。
 
         必须先调用 prefill 建立上下文。
@@ -123,7 +122,8 @@ class BatchRunner:
         with torch.no_grad():
             logits = self.model(token_tensor)
         logits = logits[:, -1, :]  # [B, vocab]
-        next_ids = self.sampler(logits)  # [B, 1]
+        s = sampler if sampler is not None else self.sampler
+        next_ids = s(logits)  # [B, 1]
 
         self._seq_len += 1
         return next_ids[:, 0].tolist()  # length B
@@ -133,10 +133,19 @@ class BatchRunner:
         prompt: Union[str, List[Dict[str, str]]],
         max_new_tokens: int = 100,
         eos_ids: Union[int, Collection[int], None] = None,
+        open_thinking: bool = False,
+        temperature: Optional[float] = None,
+        top_k: Optional[int] = None,
     ) -> Iterator[str]:
         """异步：逐词元 yield 解码文本。"""
         eos = self.eos_ids if eos_ids is None else self._normalize_eos(eos_ids)
-        ids = self._encode(prompt)
+        ids = self._encode(prompt, open_thinking=open_thinking)
+        if temperature is not None or top_k is not None:
+            t = temperature if temperature is not None else 1.0
+            k = top_k if top_k is not None else 0
+            sampler = _build_sampler(t, k)
+        else:
+            sampler = self.sampler
 
         first_ids = self.prefill(ids)
         if first_ids[0] in eos:
@@ -145,7 +154,7 @@ class BatchRunner:
 
         cur = first_ids
         for _ in range(max_new_tokens - 1):
-            nxt = self.step(cur)
+            nxt = self.step(cur, sampler=sampler)
             if nxt[0] in eos:
                 break
             yield self.tokenizer.decode(nxt, skip_special_tokens=False)
@@ -156,10 +165,15 @@ class BatchRunner:
         prompt: Union[str, List[Dict[str, str]]],
         max_new_tokens: int = 100,
         eos_ids: Union[int, Collection[int], None] = None,
+        open_thinking: bool = False,
+        temperature: Optional[float] = None,
+        top_k: Optional[int] = None,
     ) -> str:
         """同步：返回完整文本。"""
         return "".join(
-            self.generate_stream(prompt, max_new_tokens, eos_ids)
+            self.generate_stream(
+                prompt, max_new_tokens, eos_ids, open_thinking, temperature, top_k
+            )
         )
 
     # ── 内部方法 ──────────────────────────────────
@@ -174,30 +188,23 @@ class BatchRunner:
         )
         self._seq_len = 0
 
-    def _encode(self, prompt: Union[str, List[Dict[str, str]]]) -> torch.Tensor:
+    def _encode(self, prompt: Union[str, List[Dict[str, str]]], open_thinking: bool = False) -> torch.Tensor:
         """prompt → token id tensor [1, S]。
 
         str  → 直接 tokenize
-        list → jinja2 chat template 渲染后 tokenize
+        list → chat template 渲染后 tokenize
         """
         if isinstance(prompt, str):
             text = prompt
         elif isinstance(prompt, list):
-            text = self._apply_chat_template(prompt)
+            text = self.tokenizer.apply_chat_template(
+                prompt, tokenize=False, add_generation_prompt=True, open_thinking=open_thinking
+            )
         else:
             raise TypeError(
                 f"prompt must be str or list[dict], got {type(prompt)}"
             )
-        ids = self.tokenizer.encode(text)
-        return torch.tensor([ids.ids])
-
-    def _apply_chat_template(self, messages: List[Dict[str, str]]) -> str:
-        """用 jinja2 渲染 chat template，无 template 时简单拼接。"""
-        if self.chat_template is None:
-            return "\n".join(f"{m['role']}: {m['content']}" for m in messages)
-        env = jinja2.Environment()
-        template = env.from_string(self.chat_template)
-        return template.render(messages=messages)
+        return torch.tensor([self.tokenizer.encode(text)])
 
     @staticmethod
     def _normalize_eos(
@@ -213,22 +220,16 @@ class BatchRunner:
 # ── 模块级辅助函数 ───────────────────────────────
 
 
-def _load_chat_template(model_path: str) -> Optional[str]:
-    """从 tokenizer_config.json 读取 chat_template 字段。"""
-    path = os.path.join(model_path, "tokenizer_config.json")
-    if os.path.exists(path):
-        with open(path, "r", encoding="utf-8") as f:
-            return json.load(f).get("chat_template", None)
-    return None
+def _build_sampler(temperature: float, top_k: int) -> Sampler:
+    """根据 temperature 和 top_k 构建 Sampler。"""
+    if temperature > 0.0 and top_k > 0:
+        return TopKSampler(top_k=top_k, temperature=temperature)
+    elif temperature > 0.0:
+        return TemperatureSampler(temperature=temperature)
+    else:
+        return GreedySampler()
 
 
 def _sampler_from_gen_config(gen_config: GenerationConfig) -> Sampler:
     """根据 GenerationConfig 自动选择 Sampler 类型。"""
-    if gen_config.temperature > 0.0 and gen_config.top_k > 0:
-        return TopKSampler(
-            top_k=gen_config.top_k, temperature=gen_config.temperature
-        )
-    elif gen_config.temperature > 0.0:
-        return TemperatureSampler(temperature=gen_config.temperature)
-    else:
-        return GreedySampler()
+    return _build_sampler(gen_config.temperature, gen_config.top_k)
