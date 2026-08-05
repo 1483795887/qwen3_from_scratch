@@ -53,7 +53,7 @@ def _verify_with_shared_wrapper(
     HEAD_DIM,
     BLOCK_SIZE_N,
 ):
-    output = torch.empty(BLOCK_SIZE_N, HEAD_DIM, device="cuda")
+    output = torch.zeros(BLOCK_SIZE_N, HEAD_DIM, device="cuda")
 
     grid = (1,)
     load_paged_memory_wrapper[grid](
