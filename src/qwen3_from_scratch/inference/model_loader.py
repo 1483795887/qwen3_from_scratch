@@ -38,4 +38,6 @@ class ModelLoader:
         model = Qwen3(config=config)
         model.load_state(loader)
         model.to(device)
+        model.eval()
+        model.requires_grad_(False)
         return model
