@@ -6,6 +6,11 @@ import torch
 import torch.nn as nn
 from transformers import AutoTokenizer, PreTrainedTokenizer
 
+from qwen3_from_scratch.factory.batch_config import (
+    BatchConfig,
+    ResolvedModelEntry,
+    load_batch_config,
+)
 from qwen3_from_scratch.factory.config import ComponentConfig, GenerationConfig
 from qwen3_from_scratch.inference.context import ModelContext, set_forward_context
 from qwen3_from_scratch.inference.kv_cache.pre_allocated_kv_cache import (
@@ -40,11 +45,13 @@ class BatchRunner:
         max_len: int = 2048,
         chat_template: Optional[str] = None,
         eos_ids: Union[int, Collection[int], None] = None,
+        max_new_tokens: int = 100,
     ):
         self.model = model
         self.tokenizer = tokenizer
         self.sampler = sampler
         self.max_len = max_len
+        self._max_new_tokens = max_new_tokens
         self.chat_template = chat_template
         self.device = next(model.parameters()).device
 
@@ -85,6 +92,40 @@ class BatchRunner:
             chat_template=tokenizer.chat_template,
             eos_ids=tokenizer.eos_token_id,
         )
+
+    @classmethod
+    def from_model_entry(
+        cls, entry: ResolvedModelEntry
+    ) -> "BatchRunner":
+        """从已合并的模型条目构建引擎。
+
+        Sampler 从 entry.generation 构建，不走 generation_config.json。
+        max_new_tokens 从 entry.generation 取默认值。
+        """
+        sampler = _build_sampler(
+            entry.generation.temperature, entry.generation.top_k
+        )
+        runner = cls.from_path(
+            model_path=entry.path,
+            device=entry.device,
+            sampler=sampler,
+            max_len=entry.max_len,
+            components=entry.components or None,
+        )
+        runner._max_new_tokens = entry.generation.max_new_tokens
+        return runner
+
+    @classmethod
+    def from_config(
+        cls, config_path: str, model_name: str
+    ) -> "BatchRunner":
+        """从 YAML 配置文件加载并构建指定模型的引擎。
+
+        等价于 load_batch_config → get_model → from_model_entry。
+        """
+        config = load_batch_config(config_path)
+        entry = config.get_model(model_name)
+        return cls.from_model_entry(entry)
 
     # ── public API ────────────────────────────────
 
@@ -131,13 +172,18 @@ class BatchRunner:
     def generate_stream(
         self,
         prompt: Union[str, List[Dict[str, str]]],
-        max_new_tokens: int = 100,
+        max_new_tokens: Optional[int] = None,
         eos_ids: Union[int, Collection[int], None] = None,
         open_thinking: bool = False,
         temperature: Optional[float] = None,
         top_k: Optional[int] = None,
     ) -> Iterator[str]:
         """异步：逐词元 yield 解码文本。"""
+        n = (
+            max_new_tokens
+            if max_new_tokens is not None
+            else self._max_new_tokens
+        )
         eos = self.eos_ids if eos_ids is None else self._normalize_eos(eos_ids)
         ids = self._encode(prompt, open_thinking=open_thinking)
         if temperature is not None or top_k is not None:
@@ -153,7 +199,7 @@ class BatchRunner:
         yield self.tokenizer.decode(first_ids, skip_special_tokens=False)
 
         cur = first_ids
-        for _ in range(max_new_tokens - 1):
+        for _ in range(n - 1):
             nxt = self.step(cur, sampler=sampler)
             if nxt[0] in eos:
                 break
@@ -163,7 +209,7 @@ class BatchRunner:
     def generate(
         self,
         prompt: Union[str, List[Dict[str, str]]],
-        max_new_tokens: int = 100,
+        max_new_tokens: Optional[int] = None,
         eos_ids: Union[int, Collection[int], None] = None,
         open_thinking: bool = False,
         temperature: Optional[float] = None,
