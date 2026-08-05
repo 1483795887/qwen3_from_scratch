@@ -300,6 +300,28 @@ class VarLenPagedAttn(MyAttn):
         assert k.shape == v.shape
         _, num_heads_k,  _ = k.shape
         assert num_heads_q % num_heads_k == 0
+
+        if q.is_cuda:
+            assert context.cum_seq_lens_kv.shape == context.cum_seq_lens_q.shape
+            assert context.cum_seq_lens_q.shape[0] > 0
+            assert isinstance(context.kv_cache, PagedKVCache)
+            from qwen3_from_scratch.kernels.triton.paged_attn import (
+                flash_attn_varlen_func,
+            )
+            k_cache, v_cache = context.kv_cache.get(self.layer_idx)
+            cum_q = context.cum_seq_lens_q
+            cum_kv = context.cum_seq_lens_kv
+            max_seqlen_q = int((cum_q[1:] - cum_q[:-1]).max())
+            max_seqlen_k = int((cum_kv[1:] - cum_kv[:-1]).max())
+            scale = hidden_dim ** -0.5
+            return flash_attn_varlen_func(
+                q, k_cache, v_cache,
+                max_seqlen_q=max_seqlen_q, cu_seqlens_q=cum_q,
+                max_seqlen_k=max_seqlen_k, cu_seqlens_k=cum_kv,
+                softmax_scale=scale, causal=True,
+                block_table=context.block_tables,
+            )
+
         groups = num_heads_q // num_heads_k
 
         TILE_SIZE_N = 32

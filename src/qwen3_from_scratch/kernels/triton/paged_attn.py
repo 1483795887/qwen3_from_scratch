@@ -25,9 +25,11 @@ def load_paged_memory(
     result = tl.zeros((BLOCK_SIZE_N, HEAD_DIM), dtype=cache.dtype.element_ty)
     dim_offsets = tl.arange(0, HEAD_DIM)
     row_offsets = tl.arange(0, BLOCK_SIZE_N)
-    
+
     i_size = i_end - i_start
-    # i_start 总是 BLOCK_SIZE_N 的整倍数，从而是 PAGE_BLOCK_SIZE 的整倍数
+    # 页内起始偏移: 只有 i_start 是 PAGE_BLOCK_SIZE 整倍数时才为 0
+    # (decode 时 causal STAGE 2 的 i_start = N_KEY - 1, 不是整倍数)
+    block_offset = i_start % PAGE_BLOCK_SIZE
     for i in tl.range(i_start, i_end, PAGE_BLOCK_SIZE):
         block_idx = i // PAGE_BLOCK_SIZE
         block_id = tl.load(block_tables + block_idx)
@@ -36,12 +38,18 @@ def load_paged_memory(
         # 从 -loaded_heads 开始加载 PAGE_BLOCK_SIZE'
         # BLOCK_SIZE_N 中加载 [loaded_heads, loaded_heads + PAGE_BLOCK_SIZE)
         # 所以 mask 要把前后的给遮掉
-        global_row_offsets = block_id * PAGE_BLOCK_SIZE - loaded_rows + row_offsets[:, None]
+        # 页内偏移 = block_offset, 页内可加载量 = PAGE_BLOCK_SIZE - block_offset
+        global_row_offsets = (
+            block_id * PAGE_BLOCK_SIZE
+            - loaded_rows
+            + row_offsets[:, None]
+            + block_offset
+        )
         block_data = tl.load(
-            cache 
+            cache
             + global_row_offsets * HIDDEN_DIM
             + dim_offsets[None, :],
-            mask=((row_offsets[:, None]) < tl.minimum(i_size, loaded_rows + PAGE_BLOCK_SIZE)) & (row_offsets[:, None] >= loaded_rows),
+            mask=((row_offsets[:, None]) < tl.minimum(i_size, loaded_rows + PAGE_BLOCK_SIZE - block_offset)) & (row_offsets[:, None] >= loaded_rows),
             other=0.0,
         )
         result += block_data
@@ -81,9 +89,7 @@ def flash_attention_intr(
     max_val,
     dominator,
     N_KEY,
-    start_m,
     scale,
-    offsets_n,
     offsets_m,
     block_tables,
     STAGE: tl.constexpr,
@@ -95,21 +101,25 @@ def flash_attention_intr(
     cache_type: tl.constexpr,
 ):
     dtype = data_q.dtype
+    # query 块在请求内的全局起始位置: already_cached + start_m * BLOCK_SIZE_M
+    m_start = tl.min(offsets_m)
     if STAGE == 1:
-        lo, hi = 0, min(start_m * BLOCK_SIZE_M, N_KEY)
+        lo, hi = 0, tl.minimum(m_start, N_KEY)
     elif STAGE == 2:
-        lo, hi = min(start_m * BLOCK_SIZE_M, N_KEY), min(
-            (start_m + 1) * BLOCK_SIZE_M, N_KEY
+        lo, hi = tl.minimum(m_start, N_KEY), tl.minimum(
+            m_start + BLOCK_SIZE_M, N_KEY
         )
     else:
         lo, hi = 0, N_KEY
     for k in tl.range(lo, hi, BLOCK_SIZE_N, warp_specialize=True):
         k = tl.multiple_of(k, BLOCK_SIZE_N)
+        i_end = tl.minimum(hi, k + BLOCK_SIZE_N)
+        offsets_n = k + tl.arange(0, BLOCK_SIZE_N)
         if cache_type == 0:
             data_k = load_contiguous_memory(
                 K_ptr,
                 k,
-                tl.minimum(hi, k + BLOCK_SIZE_N),
+                i_end,
                 NUM_HEADS,
                 HEAD_DIM,
                 BLOCK_SIZE_N,
@@ -117,7 +127,7 @@ def flash_attention_intr(
             data_v = load_contiguous_memory(
                 V_ptr,
                 k,
-                tl.minimum(hi, k + BLOCK_SIZE_N),
+                i_end,
                 NUM_HEADS,
                 HEAD_DIM,
                 BLOCK_SIZE_N,
@@ -127,7 +137,7 @@ def flash_attention_intr(
                 K_ptr,
                 block_tables,
                 k,
-                tl.minimum(hi, k + BLOCK_SIZE_N),
+                i_end,
                 NUM_HEADS,
                 PAGE_BLOCK_SIZE,
                 HEAD_DIM,
@@ -137,14 +147,14 @@ def flash_attention_intr(
                 V_ptr,
                 block_tables,
                 k,
-                tl.minimum(hi, k + BLOCK_SIZE_N),
+                i_end,
                 NUM_HEADS,
                 PAGE_BLOCK_SIZE,
                 HEAD_DIM,
                 BLOCK_SIZE_N,
             )
         attn = tl.dot(data_q, data_k.T) * scale
-        attn = tl.where(offsets_n[None, :] < N_KEY, attn, -float("inf"))
+        attn = tl.where(offsets_n[None, :] < i_end, attn, -float("inf"))
         if STAGE == 2:
             attn = tl.where(
                 offsets_m[:, None] >= offsets_n[None, :], attn, -float("inf")
@@ -161,9 +171,7 @@ def flash_attention_intr(
         max_val = new_max_val
         exp_attn = exp_attn.to(dtype)
         result_o = result_o * scale_factor + tl.dot(exp_attn, data_v)
-
-        offsets_n += BLOCK_SIZE_N
-    return result_o, max_val, dominator, offsets_n
+    return result_o, max_val, dominator
 
 
 @triton.jit
@@ -213,7 +221,6 @@ def flash_attn_varlen_kernel(
         num_blocks_per_seq = (max_seq_len_k + PAGE_BLOCK_SIZE - 1) // PAGE_BLOCK_SIZE
         block_tables = block_tables + b_id * num_blocks_per_seq
 
-    offsets_n = tl.arange(0, BLOCK_SIZE_N)
     offsets_qm = n_q_id * BLOCK_SIZE_M + tl.arange(0, BLOCK_SIZE_M)
     global_qm = offsets_qm + already_cached
     offsets_qd = tl.arange(0, HEAD_DIM)
@@ -228,7 +235,7 @@ def flash_attn_varlen_kernel(
     max_val = tl.zeros((BLOCK_SIZE_M, 1), dtype=tl.float32) - float("inf")
     dominator = tl.zeros((BLOCK_SIZE_M, 1), dtype=tl.float32)
     if causal:
-        result_o, max_val, dominator, offsets_n = flash_attention_intr(
+        result_o, max_val, dominator = flash_attention_intr(
             data_q,
             K_ptr,
             V_ptr,
@@ -236,9 +243,7 @@ def flash_attn_varlen_kernel(
             max_val,
             dominator,
             N_KEY,
-            n_q_id,
             scale,
-            offsets_n,
             global_qm,
             block_tables,
             1,
@@ -249,7 +254,7 @@ def flash_attn_varlen_kernel(
             HEAD_DIM,
             cache_type,
         )
-        result_o, max_val, dominator, offsets_n = flash_attention_intr(
+        result_o, max_val, dominator = flash_attention_intr(
             data_q,
             K_ptr,
             V_ptr,
@@ -257,9 +262,7 @@ def flash_attn_varlen_kernel(
             max_val,
             dominator,
             N_KEY,
-            n_q_id,
             scale,
-            offsets_n,
             global_qm,
             block_tables,
             2,
@@ -271,7 +274,7 @@ def flash_attn_varlen_kernel(
             cache_type,
         )
     else:
-        result_o, max_val, dominator, offsets_n = flash_attention_intr(
+        result_o, max_val, dominator = flash_attention_intr(
             data_q,
             K_ptr,
             V_ptr,
@@ -279,9 +282,7 @@ def flash_attn_varlen_kernel(
             max_val,
             dominator,
             N_KEY,
-            n_q_id,
             scale,
-            offsets_n,
             global_qm,
             block_tables,
             3,

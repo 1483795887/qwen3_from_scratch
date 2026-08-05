@@ -323,3 +323,43 @@ class PagedSelfAttention(FusedSelfAttention):
     def forward(self, x: torch.Tensor, residual: Optional[torch.Tensor] = None):
         if not x.is_cuda:
             return self._forward_pytorch(x, residual)
+
+        ctx = get_forward_context()
+        total_seq_len, hidden_dim = x.shape
+        H_q = self.num_heads
+        H_kv = self.num_kv_heads
+        D = self.head_dim
+
+        cos, sin = self._get_cos_sin(x)
+
+        from qwen3_from_scratch.kernels.triton.gemm import linear
+
+        total_out = (H_q + 2 * H_kv) * D
+        qkv = torch.empty(total_seq_len, total_out, dtype=x.dtype, device=x.device)
+        linear(x, self.qkv_proj.weight, qkv)
+
+        gamma = torch.stack([self.q_norm_weight, self.k_norm_weight])
+        from qwen3_from_scratch.kernels.triton.self_attn import (
+            fused_qk_norm_rope,
+        )
+
+        fused_qk_norm_rope(
+            qkv.view(1, total_seq_len, total_out), gamma, cos, sin,
+            D, self.groups, self.eps,
+        )
+
+        q_end = H_q * D
+        k_end = q_end + H_kv * D
+        q = qkv[:, :q_end].contiguous().view(total_seq_len, H_q, D)
+        k = qkv[:, q_end:k_end].contiguous().view(total_seq_len, H_kv, D)
+        v = qkv[:, k_end:].contiguous().view(total_seq_len, H_kv, D)
+
+        ctx.kv_cache.update(k, v, self.layer_idx, ctx.cache_position)
+
+        o = self.attn(q, k, v)
+        o = o.reshape(total_seq_len, -1)
+        output = torch.empty(
+            total_seq_len, self.config.hidden_size, dtype=x.dtype, device=x.device
+        )
+        linear(o, self.o_proj.weight, output, bias=residual)
+        return output
