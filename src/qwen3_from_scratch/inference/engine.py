@@ -142,7 +142,7 @@ class BatchRunner:
         self._context.position_ids = torch.arange(
             0, prompt_ids.shape[1], dtype=torch.long, device=self.device
         ).unsqueeze(0)
-        with torch.no_grad():
+        with torch.inference_mode():
             logits = self.model(prompt_ids)
         logits = logits[:, -1, :]  # [B, vocab]
         next_ids = self.sampler(logits)  # [B, 1]
@@ -160,7 +160,7 @@ class BatchRunner:
             self._seq_len, self._seq_len + 1, dtype=torch.long, device=self.device
         ).unsqueeze(0)
         token_tensor = torch.tensor([token_ids], device=self.device)  # [B, 1]
-        with torch.no_grad():
+        with torch.inference_mode():
             logits = self.model(token_tensor)
         logits = logits[:, -1, :]  # [B, vocab]
         s = sampler if sampler is not None else self.sampler
