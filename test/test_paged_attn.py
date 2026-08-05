@@ -457,22 +457,19 @@ def test_torch_paged_attn_prefill_with_existing_kv(model_config, device):
 # ---------------------------------------------------------------------------
 
 
-def _shd_to_bshd(kv_shd, seq_lens, max_kv_per_seq):
-    """展平 SHD 的 KV → BSHD padding 形式, 供 PagedKVCache.update 写入。
+def _build_var_len_slot_mapping(block_tables, seq_lens, block_size, device):
+    """为变长 SHD 输入构建 slot_mapping, 形状 (sum(seq_lens),)。
 
-    kv_shd: (total_kv, num_heads_kv, head_dim), 各请求按 cum_seq_lens_kv 拼接。
+    与 _build_slot_mapping 不同: 不做 BSHD padding, 直接对应扁平拼接的 kv_shd。
     """
-    n_seqs = len(seq_lens)
-    num_heads = kv_shd.shape[1]
-    head_dim = kv_shd.shape[2]
-    out = torch.zeros(
-        n_seqs, max_kv_per_seq, num_heads, head_dim, device=kv_shd.device
-    )
-    offset = 0
-    for i, n in enumerate(seq_lens):
-        out[i, :n] = kv_shd[offset:offset + n]
-        offset += n
-    return out
+    slots = []
+    for b, n in enumerate(seq_lens):
+        for i in range(n):
+            block_idx = i // block_size
+            offset = i % block_size
+            slot = block_tables[b, block_idx].item() * block_size + offset
+            slots.append(slot)
+    return torch.tensor(slots, dtype=torch.int32, device=device)
 
 
 def _create_scattered_block_tables(n_seqs, blocks_per_seq, device):
@@ -514,11 +511,9 @@ def _run_flash_attn_varlen_paged(model_config, q_shd, kv_shd, seq_lens_kv,
     )
     blocks_per_seq = (max_kv_per_seq + block_size - 1) // block_size
     block_tables = _create_scattered_block_tables(n_seqs, blocks_per_seq, q_shd.device)
-    slot_mapping = _build_slot_mapping(
-        block_tables, seq_lens_kv, max_kv_per_seq, block_size, q_shd.device,
+    slot_mapping = _build_var_len_slot_mapping(
+        block_tables, seq_lens_kv, block_size, q_shd.device,
     )
-    k_bshd = _shd_to_bshd(kv_shd, seq_lens_kv, max_kv_per_seq)
-    v_bshd = _shd_to_bshd(kv_shd, seq_lens_kv, max_kv_per_seq)
 
     context = ModelContext(
         use_cache=True,
@@ -530,7 +525,7 @@ def _run_flash_attn_varlen_paged(model_config, q_shd, kv_shd, seq_lens_kv,
     old_context = get_forward_context()
     try:
         set_forward_context(context)
-        kv_cache.update(k_bshd, v_bshd, layer_idx)
+        kv_cache.update(kv_shd, kv_shd, layer_idx)
         k_cache, v_cache = kv_cache.get(layer_idx)
         return flash_attn_varlen_func(
             q_shd, k_cache, v_cache,

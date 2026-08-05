@@ -71,9 +71,280 @@ def load_contiguous_memory(
         other=0.0,
     )
 
-def main():
-    pass
+
+@triton.jit
+def flash_attention_intr(
+    data_q,
+    K_ptr,
+    V_ptr,
+    result_o,
+    max_val,
+    dominator,
+    N_KEY,
+    start_m,
+    scale,
+    offsets_n,
+    offsets_m,
+    block_tables,
+    STAGE: tl.constexpr,
+    BLOCK_SIZE_M: tl.constexpr,
+    BLOCK_SIZE_N: tl.constexpr,
+    PAGE_BLOCK_SIZE: tl.constexpr,
+    NUM_HEADS: tl.constexpr,
+    HEAD_DIM: tl.constexpr,
+    cache_type: tl.constexpr,
+):
+    dtype = data_q.dtype
+    if STAGE == 1:
+        lo, hi = 0, min(start_m * BLOCK_SIZE_M, N_KEY)
+    elif STAGE == 2:
+        lo, hi = min(start_m * BLOCK_SIZE_M, N_KEY), min(
+            (start_m + 1) * BLOCK_SIZE_M, N_KEY
+        )
+    else:
+        lo, hi = 0, N_KEY
+    for k in tl.range(lo, hi, BLOCK_SIZE_N, warp_specialize=True):
+        k = tl.multiple_of(k, BLOCK_SIZE_N)
+        if cache_type == 0:
+            data_k = load_contiguous_memory(
+                K_ptr,
+                k,
+                tl.minimum(hi, k + BLOCK_SIZE_N),
+                NUM_HEADS,
+                HEAD_DIM,
+                BLOCK_SIZE_N,
+            )
+            data_v = load_contiguous_memory(
+                V_ptr,
+                k,
+                tl.minimum(hi, k + BLOCK_SIZE_N),
+                NUM_HEADS,
+                HEAD_DIM,
+                BLOCK_SIZE_N,
+            )
+        else:
+            data_k = load_paged_memory(
+                K_ptr,
+                block_tables,
+                k,
+                tl.minimum(hi, k + BLOCK_SIZE_N),
+                NUM_HEADS,
+                PAGE_BLOCK_SIZE,
+                HEAD_DIM,
+                BLOCK_SIZE_N,
+            )
+            data_v = load_paged_memory(
+                V_ptr,
+                block_tables,
+                k,
+                tl.minimum(hi, k + BLOCK_SIZE_N),
+                NUM_HEADS,
+                PAGE_BLOCK_SIZE,
+                HEAD_DIM,
+                BLOCK_SIZE_N,
+            )
+        attn = tl.dot(data_q, data_k.T) * scale
+        attn = tl.where(offsets_n[None, :] < N_KEY, attn, -float("inf"))
+        if STAGE == 2:
+            attn = tl.where(
+                offsets_m[:, None] >= offsets_n[None, :], attn, -float("inf")
+            )
+        tmp_max = tl.max(attn, axis=-1, keep_dims=True)
+        new_max_val = tl.maximum(max_val, tmp_max)
+        attn = attn - new_max_val
+        exp_attn = tl.math.exp2(attn)
+
+        scale_factor = tl.math.exp2(max_val - new_max_val)
+        dominator = dominator * scale_factor + tl.sum(
+            exp_attn, axis=-1, keep_dims=True
+        )
+        max_val = new_max_val
+        exp_attn = exp_attn.to(dtype)
+        result_o = result_o * scale_factor + tl.dot(exp_attn, data_v)
+
+        offsets_n += BLOCK_SIZE_N
+    return result_o, max_val, dominator, offsets_n
 
 
-if __name__ == '__main__':
-    main()
+@triton.jit
+def flash_attn_varlen_kernel(
+    Q,
+    K,
+    V,
+    output,
+    cu_seqlens_q,
+    cu_seqlens_k,
+    max_seq_len_k,
+    scale,
+    block_tables,
+    NUM_HEADS_KV: tl.constexpr,
+    groups: tl.constexpr,
+    cache_type: tl.constexpr,
+    causal: tl.constexpr,
+    HEAD_DIM: tl.constexpr,
+    BLOCK_SIZE_M: tl.constexpr,
+    BLOCK_SIZE_N: tl.constexpr,
+    PAGE_BLOCK_SIZE: tl.constexpr,
+):
+    b_id = tl.program_id(2)
+    h_id = tl.program_id(1)
+    h_id_kv = h_id // groups
+    n_q_id = tl.program_id(0)
+    result_o = tl.zeros((BLOCK_SIZE_M, HEAD_DIM), dtype=tl.float32)
+    cu_seqlen_q_start = tl.load(cu_seqlens_q + b_id)
+    cu_seqlen_q_end = tl.load(cu_seqlens_q + b_id + 1)
+    cu_seqlen_k_start = tl.load(cu_seqlens_k + b_id)
+    cu_seqlen_k_end = tl.load(cu_seqlens_k + b_id + 1)
+    N_KEY = cu_seqlen_k_end - cu_seqlen_k_start
+    N_Q = cu_seqlen_q_end - cu_seqlen_q_start
+    already_cached = N_KEY - N_Q
+
+    HIDDEN_DIM = NUM_HEADS_KV * HEAD_DIM
+    HIDDEN_DIM_Q = groups * HIDDEN_DIM
+    Q_ptr = Q + cu_seqlen_q_start * HIDDEN_DIM_Q + h_id * HEAD_DIM
+    if cache_type == 0:
+        K_ptr = K + cu_seqlen_k_start * HIDDEN_DIM + h_id_kv * HEAD_DIM
+        V_ptr = V + cu_seqlen_k_start * HIDDEN_DIM + h_id_kv * HEAD_DIM
+    else:
+        K_ptr = K + h_id_kv * HEAD_DIM
+        V_ptr = V + h_id_kv * HEAD_DIM
+    O_ptr = output + cu_seqlen_q_start * HIDDEN_DIM_Q + h_id * HEAD_DIM
+    if block_tables is not None:
+        num_blocks_per_seq = (max_seq_len_k + PAGE_BLOCK_SIZE - 1) // PAGE_BLOCK_SIZE
+        block_tables = block_tables + b_id * num_blocks_per_seq
+
+    offsets_n = tl.arange(0, BLOCK_SIZE_N)
+    offsets_qm = n_q_id * BLOCK_SIZE_M + tl.arange(0, BLOCK_SIZE_M)
+    global_qm = offsets_qm + already_cached
+    offsets_qd = tl.arange(0, HEAD_DIM)
+    mask_m = offsets_qm[:, None] < N_Q
+    mask_d = offsets_qd < HEAD_DIM
+
+    data_q = tl.load(
+        Q_ptr + offsets_qm[:, None] * HIDDEN_DIM_Q + offsets_qd[None, :],
+        mask=mask_m & mask_d,
+        other=0.0,
+    )
+    max_val = tl.zeros((BLOCK_SIZE_M, 1), dtype=tl.float32) - float("inf")
+    dominator = tl.zeros((BLOCK_SIZE_M, 1), dtype=tl.float32)
+    if causal:
+        result_o, max_val, dominator, offsets_n = flash_attention_intr(
+            data_q,
+            K_ptr,
+            V_ptr,
+            result_o,
+            max_val,
+            dominator,
+            N_KEY,
+            n_q_id,
+            scale,
+            offsets_n,
+            global_qm,
+            block_tables,
+            1,
+            BLOCK_SIZE_M,
+            BLOCK_SIZE_N,
+            PAGE_BLOCK_SIZE,
+            NUM_HEADS_KV,
+            HEAD_DIM,
+            cache_type,
+        )
+        result_o, max_val, dominator, offsets_n = flash_attention_intr(
+            data_q,
+            K_ptr,
+            V_ptr,
+            result_o,
+            max_val,
+            dominator,
+            N_KEY,
+            n_q_id,
+            scale,
+            offsets_n,
+            global_qm,
+            block_tables,
+            2,
+            BLOCK_SIZE_M,
+            BLOCK_SIZE_N,
+            PAGE_BLOCK_SIZE,
+            NUM_HEADS_KV,
+            HEAD_DIM,
+            cache_type,
+        )
+    else:
+        result_o, max_val, dominator, offsets_n = flash_attention_intr(
+            data_q,
+            K_ptr,
+            V_ptr,
+            result_o,
+            max_val,
+            dominator,
+            N_KEY,
+            n_q_id,
+            scale,
+            offsets_n,
+            global_qm,
+            block_tables,
+            3,
+            BLOCK_SIZE_M,
+            BLOCK_SIZE_N,
+            PAGE_BLOCK_SIZE,
+            NUM_HEADS_KV,
+            HEAD_DIM,
+            cache_type,
+        )
+    dtype = Q.dtype.element_ty
+    result_o = (result_o / dominator).to(dtype)
+    tl.store(
+        O_ptr + offsets_qm[:, None] * HIDDEN_DIM_Q + offsets_qd[None, :],
+        result_o,
+        mask=mask_d & mask_m,
+    )
+
+
+def flash_attn_varlen_func(
+    q: torch.Tensor,
+    k: torch.Tensor,
+    v: torch.Tensor,
+    max_seqlen_q: int,
+    cu_seqlens_q: torch.Tensor,
+    max_seqlen_k: int,
+    cu_seqlens_k: torch.Tensor,
+    softmax_scale:float,
+    causal: bool,
+    block_table: torch.Tensor | None = None,
+):
+    # 内部使用 exp2 减少乘法运算
+    softmax_scale *= math.log2(math.e)
+    H_q, D = q.shape[1:]
+    BLOCK_SIZE_M = 32
+    BLOCK_SIZE_N = 32
+    if block_table is None:
+        # 连续内存: k, v 为 (total_kv, num_heads_kv, head_dim)
+        PAGE_BLOCK_SIZE = 0
+        H_k = k.shape[1]
+        cache_type = 0
+    else:
+        # 分页内存: k, v 为缓存 (num_pages, block_size, num_heads_kv, head_dim)
+        # block_table 为 (B, blocks_per_seq)
+        PAGE_BLOCK_SIZE = k.shape[1]
+        H_k = k.shape[2]
+        cache_type = 1
+    grid = [triton.cdiv(max_seqlen_q, BLOCK_SIZE_M), H_q, cu_seqlens_q.shape[0] - 1]
+    output = torch.empty_like(q)
+    flash_attn_varlen_kernel[grid](
+        q, k, v, output,
+        cu_seqlens_q, cu_seqlens_k,
+        max_seqlen_k,
+        softmax_scale,
+        block_table,
+        H_k,
+        H_q // H_k,
+        cache_type,
+        causal,
+        D,
+        BLOCK_SIZE_M,
+        BLOCK_SIZE_N,
+        PAGE_BLOCK_SIZE
+    )
+
+    return output
