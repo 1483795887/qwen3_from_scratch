@@ -48,6 +48,29 @@ def load_paged_memory(
     return result
 
 
+@triton.jit
+def load_contiguous_memory(
+    ptr,
+    i_start,
+    i_end,
+    NUM_HEADS: tl.constexpr,
+    HEAD_DIM: tl.constexpr,
+    BLOCK_SIZE_N: tl.constexpr,
+):
+    """
+    ptr: 指向 (N, NUM_HEADS, HEAD_DIM) 的数据，传入时已经加上了 head 的偏差
+    """
+    HIDDEN_DIM = NUM_HEADS * HEAD_DIM
+    row_offsets = tl.arange(0, BLOCK_SIZE_N)
+    dim_offsets = tl.arange(0, HEAD_DIM)
+    mask = row_offsets[:, None] < tl.minimum(i_end - i_start, BLOCK_SIZE_N)
+    global_row_offsets = i_start + row_offsets[:, None]
+    return tl.load(
+        ptr + global_row_offsets * HIDDEN_DIM + dim_offsets[None, :],
+        mask=mask,
+        other=0.0,
+    )
+
 def main():
     pass
 

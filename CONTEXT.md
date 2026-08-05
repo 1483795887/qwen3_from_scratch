@@ -105,3 +105,16 @@ _Avoid_: fallback, lazy init, 兜底
 **block_tables 判定**:
 `VarLenPagedAttn` 根据 `ctx.block_tables` 是否为空判定 KV 来源。空 → 首次 prefill，直接用传入的 k/v。非空 → 从 `PagedKVCache` 读全量 KV。先 `kv_cache.update()` 写入再从 cache 读。
 _Avoid_: is_prefill 判定（已废弃，后续连续批处理时可能以其他形式回来）
+
+### Triton Paged Attention
+
+**flash_attn_varlen_func**:
+Triton 分页注意力的 prefill 入口，host 函数，接口对齐 flash-attn（同名同参）。负责多请求变长打包 + 分页/连续 KV 读取 + flash 注意力数值。Triton 专属加载器（`load_paged_memory` / `load_contiguous_memory`）是其内部实现，不是领域概念。
+_Avoid_: 直接叫 paged_attn（那是文件/模块名，语义太宽）
+
+**block_table**:
+Triton 接口参数（单数），形状 `(B, ceil(max_seqlen_k / block_size))`。与领域内 `block_tables`（复数，`ModelContext` / `BlockManager`）同物，接口层对齐 flash-attn 的命名。
+_Avoid_: 在 Triton 接口签名里写 block_tables（与 flash-attn 不一致）
+
+**分段 prefill**:
+请求已有缓存 KV（`generated_len > 0`，`cu_seqlens_q != cu_seqlens_kv`）时继续追加 prefill token。因果掩码按绝对位置计算：query 位置 `pos` 只能 attend `kv < pos`。与首 prefill（`generated_len = 0`）是两种不同的 prefill 形态。
