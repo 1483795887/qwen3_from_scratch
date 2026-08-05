@@ -27,6 +27,17 @@ class PagedKVCache(KVCache):
         assert context.slot_mapping is not None
         slot_mapping = context.slot_mapping
         assert k.shape[0] == slot_mapping.shape[0]
+        if k.is_cuda:
+            from qwen3_from_scratch.kernels.triton.paged_attn import update_paged_kv_cache
+
+            update_paged_kv_cache(
+                self.k_cache[layer_idx],
+                self.v_cache[layer_idx],
+                k,
+                v,
+                slot_mapping,
+            )
+            return
         for i in range(k.shape[0]):
             slot = slot_mapping[i]
             if slot == -1:

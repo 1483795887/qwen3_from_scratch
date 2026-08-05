@@ -349,3 +349,44 @@ def flash_attn_varlen_func(
     )
 
     return output
+
+
+@triton.jit
+def _update_paged_kv_cache_kernel(
+    k_cache,
+    v_cache,
+    k,
+    v,
+    slot_mapping,
+    HIDDEN_DIM: tl.constexpr
+):
+    n_id = tl.program_id(0)
+
+    slot = tl.load(slot_mapping + n_id)
+    if slot < 0:
+        return
+    offsets =  tl.arange(0, HIDDEN_DIM)
+    k_cache_ptr = k_cache + (slot * HIDDEN_DIM + offsets)
+    v_cache_ptr = v_cache + (slot * HIDDEN_DIM + offsets)
+    k_ptr = k + (n_id * HIDDEN_DIM + offsets)
+    v_ptr = v + (n_id * HIDDEN_DIM + offsets)
+
+    item_k = tl.load(k_ptr)
+    item_v = tl.load(v_ptr)
+    
+    target_dtype = k_cache.dtype.element_ty
+    tl.store(k_cache_ptr, item_k.to(target_dtype))
+    tl.store(v_cache_ptr, item_v.to(target_dtype))
+
+def update_paged_kv_cache(
+    k_cache: torch.Tensor,
+    v_cache: torch.Tensor,
+    k: torch.Tensor,
+    v: torch.Tensor,
+    slot_mapping: torch.Tensor,
+):
+    N = k.shape[0]
+    HIDDEN_DIM = k.shape[1] * k.shape[2]
+    _update_paged_kv_cache_kernel[(N,)](
+        k_cache, v_cache, k, v, slot_mapping, HIDDEN_DIM
+    )

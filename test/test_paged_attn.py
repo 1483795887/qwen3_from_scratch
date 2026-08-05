@@ -689,3 +689,124 @@ def test_flash_attn_varlen_single_request_smoke(model_config):
 
     assert o.shape == ref.shape
     assert torch.allclose(o, ref, atol=1e-5)
+# ---------------------------------------------------------------------------
+# PagedKVCache._update_var_len (分页写入) 测试
+#
+# 被测接口: 只走 PagedKVCache.update()/get() 公开接口。
+# 分派策略: 由 PagedKVCache 内置分派决定(device 参数化 cpu/cuda, 见 conftest)。
+#   - 当前 triton 版本未实现, cpu/cuda 均走 torch 参考实现 → 全部绿。
+#   - triton 版本落地后, cuda 用例会切换到 triton 分派, 但参考计算
+#     (独立 vectorized scatter) 不变, 因此不改用例即可验证 triton 正确性。
+#
+# 参考实现: _scatter_reference 用 torch 向量化 scatter 独立算出期望缓存,
+#   与实现内部循环结构不同, 避免"照抄实现"的 tautology。
+# ---------------------------------------------------------------------------
+
+
+def _scatter_reference(kv_cache, k_shd, v_shd, slot_mapping, layer_idx, block_size):
+    """独立参考: 基于未写入前的缓存克隆, 向量化 scatter 期望值。
+
+    未写槽位保持原样(与 torch.empty 初始内容一致), 只改写有效 slot 对应位置,
+    从而支持 torch.equal 全量比较且不依赖未初始化内存的具体值。
+    """
+    ref_k = kv_cache.k_cache[layer_idx].clone()
+    ref_v = kv_cache.v_cache[layer_idx].clone()
+    valid = slot_mapping != -1
+    slots = slot_mapping[valid].long()
+    blocks = slots // block_size
+    inner = slots % block_size
+    ref_k[blocks, inner] = k_shd[valid]
+    ref_v[blocks, inner] = v_shd[valid]
+    return ref_k, ref_v
+
+
+def _run_update_var_len(kv_cache, k_shd, v_shd, slot_mapping, layer_idx, block_size):
+    """在同一 context 中执行 PagedKVCache.update()。k_shd/v_shd 为 SHD (3D)。"""
+    context = ModelContext(
+        use_cache=True, kv_cache=kv_cache, block_size=block_size, slot_mapping=slot_mapping,
+    )
+    old_context = get_forward_context()
+    try:
+        set_forward_context(context)
+        kv_cache.update(k_shd, v_shd, layer_idx)
+        return kv_cache.get(layer_idx)
+    finally:
+        set_forward_context(old_context)
+
+
+def _make_paged_cache(model_config, num_pages, block_size, layer_idx, device):
+    num_heads_kv = model_config.num_key_value_heads
+    head_dim = model_config.head_dim
+    itemsize = torch.tensor(0, dtype=torch.float32).element_size()
+    block_size_in_bytes = 1 * num_heads_kv * head_dim * itemsize * block_size
+    mem_size = num_pages * 2 * block_size_in_bytes
+    return PagedKVCache(
+        mem_size=mem_size, layers=1, num_heads=num_heads_kv, head_dim=head_dim,
+        dtype=torch.float32, block_size=block_size, device=device,
+    )
+
+
+def _scattered_slot_mapping(block_ids, seq_len, block_size, device):
+    """按 (block_id 打散) 顺序填充 seq_len 个连续 token 的 slot, 生成 slot_mapping。
+
+    block_ids: 该序列用到的页号列表(顺序即物理顺序)。token i 落在
+    block_ids[i // block_size] 页的 (i % block_size) 槽位。
+    """
+    slots = []
+    for i in range(seq_len):
+        block = block_ids[i // block_size]
+        slots.append(block * block_size + (i % block_size))
+    return torch.tensor(slots, dtype=torch.int32, device=device)
+
+
+def test_update_var_len_scatter(model_config, device):
+    """跨多页打散写入: SHD 输入经 update 后 get 到正确分页缓存。
+
+    block_ids 故意乱序(非 0,1,2 顺序), 证明写入走间接寻址而非顺序假设。
+    """
+    layer_idx = 0
+    block_size = 16
+    seq_len = 40
+    block_ids = [3, 1, 5]
+    num_pages = 8
+    num_heads = model_config.num_key_value_heads
+    head_dim = model_config.head_dim
+
+    slot_mapping = _scattered_slot_mapping(block_ids, seq_len, block_size, device)
+    k_shd = torch.rand(seq_len, num_heads, head_dim, device=device)
+    v_shd = torch.rand(seq_len, num_heads, head_dim, device=device)
+
+    kv_cache = _make_paged_cache(model_config, num_pages, block_size, layer_idx, device)
+    ref_k, ref_v = _scatter_reference(kv_cache, k_shd, v_shd, slot_mapping, layer_idx, block_size)
+
+    got_k, got_v = _run_update_var_len(kv_cache, k_shd, v_shd, slot_mapping, layer_idx, block_size)
+
+    assert torch.equal(got_k, ref_k)
+    assert torch.equal(got_v, ref_v)
+
+
+def test_update_var_len_skips_invalid_slots(model_config, device):
+    """slot_mapping 含 -1 的 padding 槽位必须被跳过, 不写入缓存。"""
+    layer_idx = 0
+    block_size = 16
+    seq_len = 20  # 前 4 个 padding(-1), 后 16 个有效, 落入同一页
+    block_ids = [2]
+    num_pages = 5
+    num_heads = model_config.num_key_value_heads
+    head_dim = model_config.head_dim
+
+    # slot_mapping: 前 4 个 -1, 后 16 个有效
+    valid_slots = _scattered_slot_mapping(block_ids, 16, block_size, device)
+    slot_mapping = torch.cat(
+        [torch.full((4,), -1, dtype=torch.int32, device=device), valid_slots]
+    )
+    k_shd = torch.rand(seq_len, num_heads, head_dim, device=device)
+    v_shd = torch.rand(seq_len, num_heads, head_dim, device=device)
+
+    kv_cache = _make_paged_cache(model_config, num_pages, block_size, layer_idx, device)
+    ref_k, ref_v = _scatter_reference(kv_cache, k_shd, v_shd, slot_mapping, layer_idx, block_size)
+
+    got_k, got_v = _run_update_var_len(kv_cache, k_shd, v_shd, slot_mapping, layer_idx, block_size)
+
+    assert torch.equal(got_k, ref_k)
+    assert torch.equal(got_v, ref_v)
