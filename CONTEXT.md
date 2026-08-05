@@ -67,6 +67,27 @@ _Avoid_: 组件实现持久化进 config.json（架构参数与组件实现分�
 **ComponentFactory**:
 组件注册表 + 工厂。`@register(component_type, name)` 装饰器注册实现类，`create(component_type, config, ...)` 按 `ComponentConfig.name` 查表实例化。是 `ComponentConfig` 的实现机制，不是领域概念。
 
+### 配置加载
+
+**BatchConfig**:
+Batch 模式的多模型配置文件。YAML 格式，顶层含全局 `generation` 默认值和 `models` 列表。通过 `load_batch_config(config_path)` 加载，返回 `BatchConfig` 实例。加载时全量校验所有模型条目（name 唯一、path 存在、components 注册名有效、max_len 合法等）。
+_Avoid_: config.json（模型架构参数文件，不混淆）
+
+**ModelEntry**:
+`BatchConfig.models` 列表中的一个模型条目，未合并状态。持有 `name`（唯一标识符）、`path`（模型目录）、`device`、`max_len`、`components`（组件覆写）、`generation`（`Optional`，模型级覆盖）。
+_Avoid_: model config（混淆 ModelConfig）
+
+**ResolvedModelEntry**:
+`BatchConfig.get_model(name)` 返回的已合并对象。全局 `GenerationDefaults` 与模型级 `GenerationOverrides` 已深度合并，所有字段必填无歧义。Runner 构建只消费 `ResolvedModelEntry`，不关心合并过程。
+_Avoid_: ModelEntry（未合并，不直接用于构建 Runner）
+
+**GenerationDefaults / GenerationOverrides**:
+全局默认 / 模型级覆盖，字段相同（`temperature` / `top_k` / `top_p` / `do_sample` / `max_new_tokens`）。合并方式为深度合并——模型级只覆盖显式声明的字段，未声明的继承全局。优先级链：运行时参数 > 模型级覆盖 > 全局默认 > 模型目录的 `generation_config.json`。
+
+**PackedConfig**:
+Packed 模式的多模型配置文件（待实现）。与 `BatchConfig` 完全分离，不共享基类。将含 `kv_cache_memory_utilization` 等 Packed 模式专用推理参数。
+_Avoid_: BatchConfig（两种配置各自独立）
+
 ### 核心原则
 
 **模型纯计算**:

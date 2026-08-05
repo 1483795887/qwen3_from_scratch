@@ -1,0 +1,31 @@
+# Batch 模式多模型配置文件示例
+#
+# 使用方法：
+#   1. 将下方 path 改成你的模型下载路径
+#   2. 运行 examples/run_from_config.py
+
+# 全局采样默认值，所有模型继承
+# 优先级：运行时参数 > 模型级覆盖 > 此处全局默认 > 模型目录 generation_config.json
+generation:
+  temperature: 0.85
+  top_k: 40
+  top_p: 1.0
+  do_sample: true
+  max_new_tokens: 2048
+
+models:
+  - name: "qwen3-0.6b"
+    path: "/path/to/Qwen3-0.6B"
+    device: "cpu"
+    max_len: 2048
+    components: {}            # 空 = 全 base 实现
+
+  - name: "minimind-moe"
+    path: "/path/to/minimind-3-moe"
+    device: "cpu"
+    max_len: 2048
+    components:
+      mlp: "moe"              # 简写：只换实现名，无 kwargs
+    generation:               # 模型级覆盖，只覆盖显式声明的字段
+      temperature: 0.7
+      max_new_tokens: 1024
