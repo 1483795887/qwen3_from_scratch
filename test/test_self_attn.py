@@ -244,8 +244,6 @@ def _build_cum_seq_lens(seq_lens, device):
 
 def test_paged_self_attn_var_len_shape(model_config, device):
     """PagedSelfAttention 变长输入 shape 测试: 2 条不同长度序列 [4, 8]。"""
-    if device == "cuda":
-        pytest.skip("PagedSelfAttention CUDA 路径尚未实现")
 
     layer_idx = 0
     block_size = 16
@@ -304,9 +302,6 @@ def test_paged_self_attn_var_len_prefill(
     model_config, qwen3_config, device
 ):
     """PagedSelfAttention 变长 prefill: 2 条不同长度序列 [4, 8]，对比 HF 参考实现。"""
-    if device == "cuda":
-        pytest.skip("PagedSelfAttention CUDA 路径尚未实现")
-
     layer_idx = 0
     block_size = 16
 
@@ -396,9 +391,6 @@ def test_paged_self_attn_var_len_decode(
       2. Decode 阶段: 用新 token 调用 PagedSelfAttention，从缓存读取全部 KV
       3. 参考: HF Qwen3Attention 全量 prefill 后取最后一个 token 的输出
     """
-    if device == "cuda":
-        pytest.skip("PagedSelfAttention CUDA 路径尚未实现")
-
     layer_idx = 0
     block_size = 16
 

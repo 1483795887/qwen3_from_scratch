@@ -1,3 +1,4 @@
+import pytest
 import torch
 import torch.nn.functional as F
 from transformers.models.qwen3.modeling_qwen3 import (
@@ -226,7 +227,9 @@ def _per_seq_sdpa_ref(q_shd, k_shd, v_shd, cum_seq_lens_q, cum_seq_lens_kv,
                 is_causal=False, scale=scale, enable_gqa=True,
             )
         else:
-            q_pos = torch.arange(kv_s, kv_e, device=device)[:q_e - q_s]
+            # 分段 prefill: 新 query token 占据 kv 区间的末尾 q_len 个绝对位置
+            # (前面 generated_len 个是已缓存的 KV), 只 attend 绝对位置 < 自身的 kv。
+            q_pos = torch.arange(kv_e - (q_e - q_s), kv_e, device=device)
             kv_pos = torch.arange(kv_s, kv_e, device=device)
             causal_mask = q_pos[:, None] < kv_pos[None, :]
             attn_mask = torch.zeros(q_e - q_s, kv_e - kv_s, device=device, dtype=q_shd.dtype)
@@ -444,3 +447,366 @@ def test_torch_paged_attn_prefill_with_existing_kv(model_config, device):
 
         assert ref.shape == new_o.shape
         assert torch.allclose(ref, new_o, atol=1e-5)
+
+
+# ---------------------------------------------------------------------------
+# flash_attn_varlen_func (Triton) 包装测试
+#
+# 红灯阶段: flash_attn_varlen_func 尚未实现, 以下用例因 import 失败而红。
+# kernel 落地后自动转绿。参考实现全部用 torch SDPA, 与实现无关。
+# ---------------------------------------------------------------------------
+
+
+def _build_var_len_slot_mapping(block_tables, seq_lens, block_size, device):
+    """为变长 SHD 输入构建 slot_mapping, 形状 (sum(seq_lens),)。
+
+    与 _build_slot_mapping 不同: 不做 BSHD padding, 直接对应扁平拼接的 kv_shd。
+    """
+    slots = []
+    for b, n in enumerate(seq_lens):
+        for i in range(n):
+            block_idx = i // block_size
+            offset = i % block_size
+            slot = block_tables[b, block_idx].item() * block_size + offset
+            slots.append(slot)
+    return torch.tensor(slots, dtype=torch.int32, device=device)
+
+
+def _create_scattered_block_tables(n_seqs, blocks_per_seq, device):
+    """打散的 block_tables: 页号逆序, 证明 kernel 走间接寻址而非顺序假设。"""
+    ids = torch.arange(
+        n_seqs * blocks_per_seq, device=device
+    ).reshape(n_seqs, blocks_per_seq)
+    return ids.flip(0).flip(1)
+
+
+def _run_flash_attn_varlen_continuous(q_shd, k_shd, v_shd, cum_seq_lens_q,
+                                      cum_seq_lens_kv, max_seqlen_q, max_seqlen_k,
+                                      scale, causal=True):
+    """连续内存路径: block_table=None, k/v 直接传连续 SHD。"""
+    from qwen3_from_scratch.kernels.triton.paged_attn import (
+        flash_attn_varlen_func,
+    )
+    return flash_attn_varlen_func(
+        q_shd, k_shd, v_shd,
+        max_seqlen_q=max_seqlen_q, cu_seqlens_q=cum_seq_lens_q,
+        max_seqlen_k=max_seqlen_k, cu_seqlens_k=cum_seq_lens_kv,
+        softmax_scale=scale, causal=causal, block_table=None,
+    )
+
+
+def _run_flash_attn_varlen_paged(model_config, q_shd, kv_shd, seq_lens_kv,
+                                 cum_seq_lens_q, cum_seq_lens_kv,
+                                 max_seqlen_q, max_seqlen_k, scale, layer_idx=0):
+    """分页路径: kv 写入 PagedKVCache, flash_attn_varlen_func 从缓存基地址 + block_table 读。"""
+    from qwen3_from_scratch.kernels.triton.paged_attn import (
+        flash_attn_varlen_func,
+    )
+
+    block_size = 16
+    n_seqs = len(seq_lens_kv)
+    max_kv_per_seq = max(seq_lens_kv)
+    kv_cache, _ = _create_kv_cache(
+        model_config, n_seqs, max_kv_per_seq, block_size, layer_idx, q_shd.device,
+    )
+    blocks_per_seq = (max_kv_per_seq + block_size - 1) // block_size
+    block_tables = _create_scattered_block_tables(n_seqs, blocks_per_seq, q_shd.device)
+    slot_mapping = _build_var_len_slot_mapping(
+        block_tables, seq_lens_kv, block_size, q_shd.device,
+    )
+
+    context = ModelContext(
+        use_cache=True,
+        kv_cache=kv_cache,
+        block_tables=block_tables,
+        block_size=block_size,
+        slot_mapping=slot_mapping,
+    )
+    old_context = get_forward_context()
+    try:
+        set_forward_context(context)
+        kv_cache.update(kv_shd, kv_shd, layer_idx)
+        k_cache, v_cache = kv_cache.get(layer_idx)
+        return flash_attn_varlen_func(
+            q_shd, k_cache, v_cache,
+            max_seqlen_q=max_seqlen_q, cu_seqlens_q=cum_seq_lens_q,
+            max_seqlen_k=max_seqlen_k, cu_seqlens_k=cum_seq_lens_kv,
+            softmax_scale=scale, causal=True, block_table=block_tables,
+        )
+    finally:
+        set_forward_context(old_context)
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA not available")
+def test_flash_attn_varlen_continuous_prefill(model_config):
+    """连续内存首 prefill: 2 个不同长度请求 (4, 8), gen=0, 因果掩码。"""
+    device = "cuda"
+    num_heads_q = model_config.num_attention_heads
+    num_heads_kv = model_config.num_key_value_heads
+    head_dim = model_config.head_dim
+    scale = head_dim ** -0.5
+
+    seq_lens = [4, 8]
+    cum = torch.tensor([0, 4, 12], dtype=torch.int32, device=device)
+    total = 12
+
+    q_shd = torch.rand(total, num_heads_q, head_dim, device=device)
+    kv_shd = torch.rand(total, num_heads_kv, head_dim, device=device)
+
+    ref = _per_seq_sdpa_ref(
+        q_shd, kv_shd, kv_shd, cum.tolist(), cum.tolist(),
+        num_heads_q, num_heads_kv, head_dim, device, scale, is_causal=True,
+    )
+    o = _run_flash_attn_varlen_continuous(
+        q_shd, kv_shd, kv_shd, cum, cum,
+        max(seq_lens), max(seq_lens), scale,
+    )
+
+    assert o.shape == ref.shape
+    assert torch.allclose(o, ref, atol=1e-5)
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA not available")
+def test_flash_attn_varlen_paged_prefill(model_config):
+    """分页内存首 prefill: 2 个不同长度请求 (4, 8), 页号打散。"""
+    device = "cuda"
+    num_heads_q = model_config.num_attention_heads
+    num_heads_kv = model_config.num_key_value_heads
+    head_dim = model_config.head_dim
+    scale = head_dim ** -0.5
+
+    seq_lens_kv = [4, 8]
+    cum = torch.tensor([0, 4, 12], dtype=torch.int32, device=device)
+    total = 12
+
+    q_shd = torch.rand(total, num_heads_q, head_dim, device=device)
+    kv_shd = torch.rand(total, num_heads_kv, head_dim, device=device)
+
+    ref = _per_seq_sdpa_ref(
+        q_shd, kv_shd, kv_shd, cum.tolist(), cum.tolist(),
+        num_heads_q, num_heads_kv, head_dim, device, scale, is_causal=True,
+    )
+    o = _run_flash_attn_varlen_paged(
+        model_config, q_shd, kv_shd, seq_lens_kv,
+        cum, cum, max(seq_lens_kv), max(seq_lens_kv), scale,
+    )
+
+    assert o.shape == ref.shape
+    assert torch.allclose(o, ref, atol=1e-5)
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA not available")
+def test_flash_attn_varlen_continuous_segmented_prefill(model_config):
+    """连续内存分段 prefill: 已有 KV (16, 16) + 新 token (4, 8), 绝对位置因果掩码。
+
+    generated_len > 0: cu_seqlens_q != cu_seqlens_kv, query 只 attend 绝对位置 < 自身的 kv。
+    """
+    device = "cuda"
+    num_heads_q = model_config.num_attention_heads
+    num_heads_kv = model_config.num_key_value_heads
+    head_dim = model_config.head_dim
+    scale = head_dim ** -0.5
+
+    seq_lens_q = [4, 8]
+    seq_lens_kv = [20, 24]  # 16 已缓存 + 新 4/8
+    cum_q = torch.tensor([0, 4, 12], dtype=torch.int32, device=device)
+    cum_kv = torch.tensor([0, 20, 44], dtype=torch.int32, device=device)
+    total_q = 12
+    total_kv = 44
+
+    q_shd = torch.rand(total_q, num_heads_q, head_dim, device=device)
+    kv_shd = torch.rand(total_kv, num_heads_kv, head_dim, device=device)
+
+    ref = _per_seq_sdpa_ref(
+        q_shd, kv_shd, kv_shd, cum_q.tolist(), cum_kv.tolist(),
+        num_heads_q, num_heads_kv, head_dim, device, scale, is_causal=True,
+    )
+    o = _run_flash_attn_varlen_continuous(
+        q_shd, kv_shd, kv_shd, cum_q, cum_kv,
+        max(seq_lens_q), max(seq_lens_kv), scale,
+    )
+
+    assert o.shape == ref.shape
+    assert torch.allclose(o, ref, atol=1e-5)
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA not available")
+def test_flash_attn_varlen_paged_segmented_prefill(model_config):
+    """分页内存分段 prefill: 已有缓存页 + 追加 prefill, 绝对位置因果掩码。"""
+    device = "cuda"
+    num_heads_q = model_config.num_attention_heads
+    num_heads_kv = model_config.num_key_value_heads
+    head_dim = model_config.head_dim
+    scale = head_dim ** -0.5
+
+    seq_lens_q = [4, 8]
+    seq_lens_kv = [20, 24]  # 16 已缓存 + 新 4/8
+    cum_q = torch.tensor([0, 4, 12], dtype=torch.int32, device=device)
+    cum_kv = torch.tensor([0, 20, 44], dtype=torch.int32, device=device)
+    total_q = 12
+    total_kv = 44
+
+    q_shd = torch.rand(total_q, num_heads_q, head_dim, device=device)
+    kv_shd = torch.rand(total_kv, num_heads_kv, head_dim, device=device)
+
+    ref = _per_seq_sdpa_ref(
+        q_shd, kv_shd, kv_shd, cum_q.tolist(), cum_kv.tolist(),
+        num_heads_q, num_heads_kv, head_dim, device, scale, is_causal=True,
+    )
+    o = _run_flash_attn_varlen_paged(
+        model_config, q_shd, kv_shd, seq_lens_kv,
+        cum_q, cum_kv, max(seq_lens_q), max(seq_lens_kv), scale,
+    )
+
+    assert o.shape == ref.shape
+    assert torch.allclose(o, ref, atol=1e-5)
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA not available")
+def test_flash_attn_varlen_single_request_smoke(model_config):
+    """单请求冒烟: 分页, gen=0。"""
+    device = "cuda"
+    num_heads_q = model_config.num_attention_heads
+    num_heads_kv = model_config.num_key_value_heads
+    head_dim = model_config.head_dim
+    scale = head_dim ** -0.5
+
+    seq_lens_kv = [8]
+    cum = torch.tensor([0, 8], dtype=torch.int32, device=device)
+    total = 8
+
+    q_shd = torch.rand(total, num_heads_q, head_dim, device=device)
+    kv_shd = torch.rand(total, num_heads_kv, head_dim, device=device)
+
+    ref = _per_seq_sdpa_ref(
+        q_shd, kv_shd, kv_shd, cum.tolist(), cum.tolist(),
+        num_heads_q, num_heads_kv, head_dim, device, scale, is_causal=True,
+    )
+    o = _run_flash_attn_varlen_paged(
+        model_config, q_shd, kv_shd, seq_lens_kv,
+        cum, cum, max(seq_lens_kv), max(seq_lens_kv), scale,
+    )
+
+    assert o.shape == ref.shape
+    assert torch.allclose(o, ref, atol=1e-5)
+# ---------------------------------------------------------------------------
+# PagedKVCache._update_var_len (分页写入) 测试
+#
+# 被测接口: 只走 PagedKVCache.update()/get() 公开接口。
+# 分派策略: 由 PagedKVCache 内置分派决定(device 参数化 cpu/cuda, 见 conftest)。
+#   - 当前 triton 版本未实现, cpu/cuda 均走 torch 参考实现 → 全部绿。
+#   - triton 版本落地后, cuda 用例会切换到 triton 分派, 但参考计算
+#     (独立 vectorized scatter) 不变, 因此不改用例即可验证 triton 正确性。
+#
+# 参考实现: _scatter_reference 用 torch 向量化 scatter 独立算出期望缓存,
+#   与实现内部循环结构不同, 避免"照抄实现"的 tautology。
+# ---------------------------------------------------------------------------
+
+
+def _scatter_reference(kv_cache, k_shd, v_shd, slot_mapping, layer_idx, block_size):
+    """独立参考: 基于未写入前的缓存克隆, 向量化 scatter 期望值。
+
+    未写槽位保持原样(与 torch.empty 初始内容一致), 只改写有效 slot 对应位置,
+    从而支持 torch.equal 全量比较且不依赖未初始化内存的具体值。
+    """
+    ref_k = kv_cache.k_cache[layer_idx].clone()
+    ref_v = kv_cache.v_cache[layer_idx].clone()
+    valid = slot_mapping != -1
+    slots = slot_mapping[valid].long()
+    blocks = slots // block_size
+    inner = slots % block_size
+    ref_k[blocks, inner] = k_shd[valid]
+    ref_v[blocks, inner] = v_shd[valid]
+    return ref_k, ref_v
+
+
+def _run_update_var_len(kv_cache, k_shd, v_shd, slot_mapping, layer_idx, block_size):
+    """在同一 context 中执行 PagedKVCache.update()。k_shd/v_shd 为 SHD (3D)。"""
+    context = ModelContext(
+        use_cache=True, kv_cache=kv_cache, block_size=block_size, slot_mapping=slot_mapping,
+    )
+    old_context = get_forward_context()
+    try:
+        set_forward_context(context)
+        kv_cache.update(k_shd, v_shd, layer_idx)
+        return kv_cache.get(layer_idx)
+    finally:
+        set_forward_context(old_context)
+
+
+def _make_paged_cache(model_config, num_pages, block_size, layer_idx, device):
+    num_heads_kv = model_config.num_key_value_heads
+    head_dim = model_config.head_dim
+    itemsize = torch.tensor(0, dtype=torch.float32).element_size()
+    block_size_in_bytes = 1 * num_heads_kv * head_dim * itemsize * block_size
+    mem_size = num_pages * 2 * block_size_in_bytes
+    return PagedKVCache(
+        mem_size=mem_size, layers=1, num_heads=num_heads_kv, head_dim=head_dim,
+        dtype=torch.float32, block_size=block_size, device=device,
+    )
+
+
+def _scattered_slot_mapping(block_ids, seq_len, block_size, device):
+    """按 (block_id 打散) 顺序填充 seq_len 个连续 token 的 slot, 生成 slot_mapping。
+
+    block_ids: 该序列用到的页号列表(顺序即物理顺序)。token i 落在
+    block_ids[i // block_size] 页的 (i % block_size) 槽位。
+    """
+    slots = []
+    for i in range(seq_len):
+        block = block_ids[i // block_size]
+        slots.append(block * block_size + (i % block_size))
+    return torch.tensor(slots, dtype=torch.int32, device=device)
+
+
+def test_update_var_len_scatter(model_config, device):
+    """跨多页打散写入: SHD 输入经 update 后 get 到正确分页缓存。
+
+    block_ids 故意乱序(非 0,1,2 顺序), 证明写入走间接寻址而非顺序假设。
+    """
+    layer_idx = 0
+    block_size = 16
+    seq_len = 40
+    block_ids = [3, 1, 5]
+    num_pages = 8
+    num_heads = model_config.num_key_value_heads
+    head_dim = model_config.head_dim
+
+    slot_mapping = _scattered_slot_mapping(block_ids, seq_len, block_size, device)
+    k_shd = torch.rand(seq_len, num_heads, head_dim, device=device)
+    v_shd = torch.rand(seq_len, num_heads, head_dim, device=device)
+
+    kv_cache = _make_paged_cache(model_config, num_pages, block_size, layer_idx, device)
+    ref_k, ref_v = _scatter_reference(kv_cache, k_shd, v_shd, slot_mapping, layer_idx, block_size)
+
+    got_k, got_v = _run_update_var_len(kv_cache, k_shd, v_shd, slot_mapping, layer_idx, block_size)
+
+    assert torch.equal(got_k, ref_k)
+    assert torch.equal(got_v, ref_v)
+
+
+def test_update_var_len_skips_invalid_slots(model_config, device):
+    """slot_mapping 含 -1 的 padding 槽位必须被跳过, 不写入缓存。"""
+    layer_idx = 0
+    block_size = 16
+    seq_len = 20  # 前 4 个 padding(-1), 后 16 个有效, 落入同一页
+    block_ids = [2]
+    num_pages = 5
+    num_heads = model_config.num_key_value_heads
+    head_dim = model_config.head_dim
+
+    # slot_mapping: 前 4 个 -1, 后 16 个有效
+    valid_slots = _scattered_slot_mapping(block_ids, 16, block_size, device)
+    slot_mapping = torch.cat(
+        [torch.full((4,), -1, dtype=torch.int32, device=device), valid_slots]
+    )
+    k_shd = torch.rand(seq_len, num_heads, head_dim, device=device)
+    v_shd = torch.rand(seq_len, num_heads, head_dim, device=device)
+
+    kv_cache = _make_paged_cache(model_config, num_pages, block_size, layer_idx, device)
+    ref_k, ref_v = _scatter_reference(kv_cache, k_shd, v_shd, slot_mapping, layer_idx, block_size)
+
+    got_k, got_v = _run_update_var_len(kv_cache, k_shd, v_shd, slot_mapping, layer_idx, block_size)
+
+    assert torch.equal(got_k, ref_k)
+    assert torch.equal(got_v, ref_v)
