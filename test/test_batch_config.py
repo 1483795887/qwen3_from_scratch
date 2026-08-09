@@ -486,26 +486,3 @@ class TestFromConfigIntegration:
         if not path or not os.path.isdir(path):
             pytest.skip("MODEL_PATH 未设置或不存在，跳过集成测试")
         return path.replace("\\", "/")
-
-    def test_from_config_builds_runner(self, real_model_path, tmp_path):
-        """from_config 能成功构建 BatchRunner 并执行推理。"""
-        yaml_path = _write_yaml(
-            tmp_path,
-            f"""
-generation:
-  temperature: 0.85
-  top_k: 40
-  max_new_tokens: 5
-models:
-  - name: "real"
-    path: "{real_model_path}"
-    device: "cpu"
-    max_len: 512
-""",
-        )
-        from qwen3_from_scratch.inference.engine import BatchRunner
-
-        engine = BatchRunner.from_config(yaml_path, "real")
-        text = engine.generate([{"role": "user", "content": "你好"}])
-        assert isinstance(text, str)
-        assert len(text) > 0

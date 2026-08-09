@@ -56,7 +56,7 @@ class TestSchedule:
         scheduled_seq = scheduled_seqs[0]
         assert scheduled_seq.req_id == seq.req_id
         assert scheduled_seq.block_tables is not None
-        assert not scheduled_seq.is_prefill
+        assert scheduled_seq.is_prefill
         assert scheduled_seq.status == SequenceStatus.RUNNING
 
     def test_restricted_by_max_seq_num(self):

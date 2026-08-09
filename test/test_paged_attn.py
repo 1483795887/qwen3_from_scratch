@@ -741,11 +741,8 @@ def _run_update_var_len(kv_cache, k_shd, v_shd, slot_mapping, layer_idx, block_s
 def _make_paged_cache(model_config, num_pages, block_size, layer_idx, device):
     num_heads_kv = model_config.num_key_value_heads
     head_dim = model_config.head_dim
-    itemsize = torch.tensor(0, dtype=torch.float32).element_size()
-    block_size_in_bytes = 1 * num_heads_kv * head_dim * itemsize * block_size
-    mem_size = num_pages * 2 * block_size_in_bytes
     return PagedKVCache(
-        mem_size=mem_size, layers=1, num_heads=num_heads_kv, head_dim=head_dim,
+        num_blocks=num_pages, layers=1, num_heads=num_heads_kv, head_dim=head_dim,
         dtype=torch.float32, block_size=block_size, device=device,
     )
 
