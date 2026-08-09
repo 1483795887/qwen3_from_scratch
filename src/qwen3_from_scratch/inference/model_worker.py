@@ -179,7 +179,9 @@ class ModelWorker:
         cum_seq_lens_kv = [0]
         device = self.device
         for seq in seqs:
-            positions.append(len(seq))
+            # 当前输入 token (last_token_id) 已被 post_process 追加进
+            # token_ids, 索引 = len(seq) - 1, 位置编码取该索引
+            positions.append(len(seq) - 1)
             last_cum_seq_q = cum_seq_lens_q[-1]
             last_cum_seq_k = cum_seq_lens_kv[-1]
             cum_seq_lens_q.append(last_cum_seq_q + 1)
