@@ -48,11 +48,42 @@ Cmake项目可选CUDA，但算子主要还是写的CUDA，cpu版本就验证准�
 ## 启动
 需要自己从Hugging Face或者魔搭上下载Qwen3的模型，复制 `.env.example` 为 `.env`，设置Qwen3模型的路径
 
-启动入口主要有两个：
+启动入口主要有三个：
 - test 下的测试用例，使用 `uv run pytest` 可以启动
 - examples/basic_generation.py，一个简单的模型推理例子，可以修改提示词查看模型整体的运行情况，例子如下
 
 ![pics](pics/basic_generation.png)
+- examples/llm_runner.py，基于 `LLMEngine` 的推理引擎示例，支持流式生成与多模型批量配置
+
+### llm_runner 使用
+
+`examples/llm_runner.py` 通过 `LLMEngine` 驱动一个后台推理进程完成生成，调用方以流式方式接收结果：
+
+```python
+from qwen3_from_scratch.inference.llm_engine import LLMEngine
+import asyncio
+from pathlib import Path
+
+async def main():
+    engine = LLMEngine(Path("examples/configs/batch2_example.yaml"), "qwen3-0.6b")
+    async for delta in engine.generate_stream([{"role": "user", "content": "介绍一下自己"}]):
+        print(delta, end='')
+    engine.close()
+
+if __name__ == '__main__':
+    asyncio.run(main())
+```
+
+运行前先将 `examples/configs/batch2_example.yaml` 中的 `path` 改成你自己的模型下载路径（也可参考其中的多模型配置方法），然后执行：
+
+```bash
+uv run examples/llm_runner.py
+```
+
+要点说明：
+- `generate_stream` 接收 OpenAI 风格的消息列表，内部会经 `apply_chat_template` 转换为模型输入
+- 多模型通过配置文件的 `models` 列表声明，每个模型可单独指定 `device`、`dtype`、`components` 与 `generation` 覆盖项
+- 使用完毕后调用 `engine.close()` 结束后台推理进程
 
 # 技术博客
 - [从零开始写Qwen3（一）模型结构分析](https://blog.csdn.net/qq_43491590/article/details/158810975?spm=1011.2415.3001.5331)
