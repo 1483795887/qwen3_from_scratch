@@ -8,7 +8,6 @@ from qwen3_from_scratch.models.parameter_loader import ParameterLoader
 
 @ComponentFactory.register("norm", "base")
 class TorchRmsNorm(nn.Module):
-
     def __init__(self, config: ModelConfig, name: str, **kwargs):
         super().__init__()
         norm_dim = kwargs.get("dim", config.head_dim)
@@ -25,21 +24,25 @@ class TorchRmsNorm(nn.Module):
     def load_state(self, loader: ParameterLoader):
         self.weight = assign(self.weight, loader.get(self.name + ".weight"))
 
+
 @ComponentFactory.register("norm", "cpp")
 class MyRmsNorm(TorchRmsNorm):
     def __init__(self, config: ModelConfig, name: str, **kwargs):
         super().__init__(config, name, **kwargs)
         from qwen3_from_scratch.kernels.ops import rms_norm_forward
+
         self.forward_func = rms_norm_forward
 
     def forward(self, x):
         return self.forward_func(x, self.weight, self.eps)
+
 
 @ComponentFactory.register("norm", "my_op")
 class MyRmsNormOpV2(TorchRmsNorm):
     def __init__(self, config: ModelConfig, name: str, **kwargs):
         super().__init__(config, name, **kwargs)
         from qwen3_from_scratch.kernels.triton.rms_norm import rms_norm_forward
+
         self.forward_func = rms_norm_forward
 
     def forward(self, x: torch.Tensor):
@@ -48,4 +51,3 @@ class MyRmsNormOpV2(TorchRmsNorm):
         sum_sq = x.pow(2).mean(dim=-1, keepdim=True)
         scale = torch.rsqrt(sum_sq + self.eps)
         return x * scale * self.weight
-            

@@ -1,6 +1,6 @@
+import torch
 import triton
 from triton import language as tl
-import torch
 
 
 def get_cuda_autotune_config():

@@ -7,8 +7,12 @@ from .kv_cache import KVCache
 
 class SimpleKVCache(KVCache):
     def __init__(self):
-        self.k_cache: dict[int, torch.Tensor | None] = defaultdict(lambda: None)
-        self.v_cache: dict[int, torch.Tensor | None] = defaultdict(lambda: None)
+        self.k_cache: dict[int, torch.Tensor | None] = defaultdict(
+            lambda: None
+        )
+        self.v_cache: dict[int, torch.Tensor | None] = defaultdict(
+            lambda: None
+        )
 
     def update(
         self,

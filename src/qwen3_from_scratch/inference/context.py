@@ -21,8 +21,10 @@ class ModelContext:
 
 _CONTEXT = ModelContext()
 
+
 def get_forward_context() -> ModelContext:
     return _CONTEXT
+
 
 def set_forward_context(context: ModelContext) -> None:
     global _CONTEXT

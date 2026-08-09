@@ -1,5 +1,5 @@
-from qwen3_from_scratch.inference.sequence import Sequence
 from qwen3_from_scratch.inference.block_manager import BlockManager
+from qwen3_from_scratch.inference.sequence import Sequence
 
 
 def make_seq(prompt_len: int = 16) -> Sequence:

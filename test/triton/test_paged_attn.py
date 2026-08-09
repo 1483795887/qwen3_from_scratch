@@ -44,8 +44,6 @@ def load_paged_memory_wrapper(
     )
 
 
-
-
 @triton.jit
 def load_contiguous_memory_wrapper(
     ptr,
@@ -249,7 +247,12 @@ def test_load_contiguous_memory_basic():
     ptr = torch.randn(N, NUM_HEADS, HEAD_DIM, device="cuda")
 
     output = _verify_contiguous_wrapper(
-        0, BLOCK_SIZE_N, ptr, NUM_HEADS, HEAD_DIM, BLOCK_SIZE_N,
+        0,
+        BLOCK_SIZE_N,
+        ptr,
+        NUM_HEADS,
+        HEAD_DIM,
+        BLOCK_SIZE_N,
     )
     expected = ptr[:BLOCK_SIZE_N, 0, :]
     assert torch.allclose(output, expected)
@@ -264,7 +267,12 @@ def test_load_contiguous_memory_non_aligned():
     ptr = torch.randn(N, NUM_HEADS, HEAD_DIM, device="cuda")
 
     output = _verify_contiguous_wrapper(
-        8, 40, ptr, NUM_HEADS, HEAD_DIM, BLOCK_SIZE_N,
+        8,
+        40,
+        ptr,
+        NUM_HEADS,
+        HEAD_DIM,
+        BLOCK_SIZE_N,
     )
     expected = ptr[8:40, 0, :]
     assert torch.allclose(output, expected)
@@ -279,7 +287,12 @@ def test_load_contiguous_memory_partial_end():
     ptr = torch.randn(N, NUM_HEADS, HEAD_DIM, device="cuda")
 
     output = _verify_contiguous_wrapper(
-        0, 17, ptr, NUM_HEADS, HEAD_DIM, BLOCK_SIZE_N,
+        0,
+        17,
+        ptr,
+        NUM_HEADS,
+        HEAD_DIM,
+        BLOCK_SIZE_N,
     )
     expected = torch.zeros(BLOCK_SIZE_N, HEAD_DIM, device="cuda")
     expected[:17] = ptr[:17, 0, :]

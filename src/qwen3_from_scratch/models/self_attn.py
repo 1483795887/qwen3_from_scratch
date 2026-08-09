@@ -48,14 +48,15 @@ class SelfAttention(nn.Module):
         q = self.rope(q).to(dtype)
         k = self.rope(k).to(dtype)
         if ctx.use_cache:
-            k,v = ctx.kv_cache.update(k.transpose(1, 2), v.transpose(1,2), self.layer_idx, ctx.cache_position)
+            k, v = ctx.kv_cache.update(
+                k.transpose(1, 2),
+                v.transpose(1, 2),
+                self.layer_idx,
+                ctx.cache_position,
+            )
             k = k.transpose(1, 2)
             v = v.transpose(1, 2)
-        o = (
-            self.gqa(q, k, v)
-            .transpose(1, 2)
-            .reshape(*input_shape, -1)
-        )
+        o = self.gqa(q, k, v).transpose(1, 2).reshape(*input_shape, -1)
         o = self.o_proj(o)
         return o
 
@@ -107,7 +108,9 @@ class FusedSelfAttention(nn.Module):
         返回 (cos, sin)，各 (N, head_dim)，N = position_ids 的长度。
         """
         ctx = get_forward_context()
-        assert ctx.position_ids is not None, "position_ids must be set before forward"
+        assert ctx.position_ids is not None, (
+            "position_ids must be set before forward"
+        )
         rotary = get_rope(
             self.head_dim,
             self.head_dim,
@@ -145,9 +148,11 @@ class FusedSelfAttention(nn.Module):
 
         cos_e = cos.view(1, S, 1, D)
         sin_e = sin.view(1, S, 1, D)
+
         def _rotate_half(x):
             x1, x2 = x.chunk(2, dim=-1)
             return torch.cat((-x2, x1), dim=-1)
+
         q = q * cos_e + _rotate_half(q) * sin_e
         k = k * cos_e + _rotate_half(k) * sin_e
 
@@ -157,15 +162,25 @@ class FusedSelfAttention(nn.Module):
 
         if ctx.use_cache:
             k, v = ctx.kv_cache.update(
-                k.transpose(1, 2), v.transpose(1, 2),
-                self.layer_idx, ctx.cache_position,
+                k.transpose(1, 2),
+                v.transpose(1, 2),
+                self.layer_idx,
+                ctx.cache_position,
             )
             k = k.transpose(1, 2)
             v = v.transpose(1, 2)
 
-        k_exp = k.unsqueeze(2).expand(-1, -1, self.groups, -1, -1).reshape(B, H_q, -1, D)
-        v_exp = v.unsqueeze(2).expand(-1, -1, self.groups, -1, -1).reshape(B, H_q, -1, D)
-        scale = D ** -0.5
+        k_exp = (
+            k.unsqueeze(2)
+            .expand(-1, -1, self.groups, -1, -1)
+            .reshape(B, H_q, -1, D)
+        )
+        v_exp = (
+            v.unsqueeze(2)
+            .expand(-1, -1, self.groups, -1, -1)
+            .reshape(B, H_q, -1, D)
+        )
+        scale = D**-0.5
         attn = torch.matmul(q.float(), k_exp.float().transpose(-2, -1)) * scale
         if S > 1:
             mask = torch.tril(torch.ones(S, attn.shape[-1], device=x.device))
@@ -179,7 +194,9 @@ class FusedSelfAttention(nn.Module):
             o = o + residual
         return o
 
-    def forward(self, x: torch.Tensor, residual: Optional[torch.Tensor] = None):
+    def forward(
+        self, x: torch.Tensor, residual: Optional[torch.Tensor] = None
+    ):
         ctx = get_forward_context()
         if x.device.type == "cpu":
             return self._forward_pytorch(x, residual)
@@ -206,24 +223,14 @@ class FusedSelfAttention(nn.Module):
 
         q_end = H_q * D
         k_end = q_end + H_kv * D
-        q = (
-            qkv[:, :, :q_end]
-            .contiguous()
-            .view(B, S, H_q, D)
-            .transpose(1, 2)
-        )
+        q = qkv[:, :, :q_end].contiguous().view(B, S, H_q, D).transpose(1, 2)
         k = (
             qkv[:, :, q_end:k_end]
             .contiguous()
             .view(B, S, H_kv, D)
             .transpose(1, 2)
         )
-        v = (
-            qkv[:, :, k_end:]
-            .contiguous()
-            .view(B, S, H_kv, D)
-            .transpose(1, 2)
-        )
+        v = qkv[:, :, k_end:].contiguous().view(B, S, H_kv, D).transpose(1, 2)
 
         if ctx.use_cache:
             k, v = ctx.kv_cache.update(
@@ -240,25 +247,35 @@ class FusedSelfAttention(nn.Module):
         o = flash_attention(q, k, v, is_causal=S > 1)
 
         o = o.transpose(1, 2).reshape(B, S, -1)
-        output = torch.empty(B, S, self.config.hidden_size, dtype=x.dtype, device=x.device)
+        output = torch.empty(
+            B, S, self.config.hidden_size, dtype=x.dtype, device=x.device
+        )
         linear(o, self.o_proj.weight, output, bias=residual)
         return output
 
-    def state_dict(self, destination=None, prefix='', keep_vars=False):
+    def state_dict(self, destination=None, prefix="", keep_vars=False):
         if destination is None:
             destination = OrderedDict()
         head_dim = self.head_dim
         q_end = self.num_heads * head_dim
         q_w, k_w, v_w = self.qkv_proj.weight.split(
-            [q_end, self.num_kv_heads * head_dim, self.num_kv_heads * head_dim], dim=0
+            [
+                q_end,
+                self.num_kv_heads * head_dim,
+                self.num_kv_heads * head_dim,
+            ],
+            dim=0,
         )
-        dst = lambda v: v if keep_vars else v.detach()
-        destination[prefix + 'q_proj.weight'] = dst(q_w)
-        destination[prefix + 'k_proj.weight'] = dst(k_w)
-        destination[prefix + 'v_proj.weight'] = dst(v_w)
-        destination[prefix + 'o_proj.weight'] = dst(self.o_proj.weight)
-        destination[prefix + 'q_norm.weight'] = dst(self.q_norm_weight)
-        destination[prefix + 'k_norm.weight'] = dst(self.k_norm_weight)
+
+        def dst(v):
+            return v if keep_vars else v.detach()
+
+        destination[prefix + "q_proj.weight"] = dst(q_w)
+        destination[prefix + "k_proj.weight"] = dst(k_w)
+        destination[prefix + "v_proj.weight"] = dst(v_w)
+        destination[prefix + "o_proj.weight"] = dst(self.o_proj.weight)
+        destination[prefix + "q_norm.weight"] = dst(self.q_norm_weight)
+        destination[prefix + "k_norm.weight"] = dst(self.k_norm_weight)
         return destination
 
     def load_state(self, loader: ParameterLoader):
@@ -281,9 +298,12 @@ class FusedSelfAttention(nn.Module):
 
 @ComponentFactory.register("self_attn", "paged_attn")
 class PagedSelfAttention(FusedSelfAttention):
-    def __init__(self, config: ModelConfig, name: str, layer_idx: int = 0, **kwargs):
+    def __init__(
+        self, config: ModelConfig, name: str, layer_idx: int = 0, **kwargs
+    ):
         super().__init__(config, name, layer_idx, **kwargs)
         from qwen3_from_scratch.models.attn import VarLenPagedAttn
+
         self.attn = VarLenPagedAttn(config, layer_idx=layer_idx)
 
     def _forward_pytorch(self, x, residual=None):
@@ -295,7 +315,9 @@ class PagedSelfAttention(FusedSelfAttention):
 
         cos, sin = self._get_cos_sin(x)
 
-        qkv = torch.nn.functional.linear(x, self.qkv_proj.weight).view((total_seq_len, -1, D))
+        qkv = torch.nn.functional.linear(x, self.qkv_proj.weight).view(
+            (total_seq_len, -1, D)
+        )
         q, k, v = qkv.split([H_q, H_kv, H_kv], dim=1)
 
         q = torch.nn.functional.rms_norm(q, (D,), self.q_norm_weight, self.eps)
@@ -320,7 +342,9 @@ class PagedSelfAttention(FusedSelfAttention):
             o = o + residual
         return o
 
-    def forward(self, x: torch.Tensor, residual: Optional[torch.Tensor] = None):
+    def forward(
+        self, x: torch.Tensor, residual: Optional[torch.Tensor] = None
+    ):
         if not x.is_cuda:
             return self._forward_pytorch(x, residual)
 
@@ -335,7 +359,9 @@ class PagedSelfAttention(FusedSelfAttention):
         from qwen3_from_scratch.kernels.triton.gemm import linear
 
         total_out = (H_q + 2 * H_kv) * D
-        qkv = torch.empty(total_seq_len, total_out, dtype=x.dtype, device=x.device)
+        qkv = torch.empty(
+            total_seq_len, total_out, dtype=x.dtype, device=x.device
+        )
         linear(x, self.qkv_proj.weight, qkv)
 
         gamma = torch.stack([self.q_norm_weight, self.k_norm_weight])
@@ -344,8 +370,13 @@ class PagedSelfAttention(FusedSelfAttention):
         )
 
         fused_qk_norm_rope(
-            qkv.view(1, total_seq_len, total_out), gamma, cos, sin,
-            D, self.groups, self.eps,
+            qkv.view(1, total_seq_len, total_out),
+            gamma,
+            cos,
+            sin,
+            D,
+            self.groups,
+            self.eps,
         )
 
         q_end = H_q * D
@@ -359,7 +390,10 @@ class PagedSelfAttention(FusedSelfAttention):
         o = self.attn(q, k, v)
         o = o.reshape(total_seq_len, -1)
         output = torch.empty(
-            total_seq_len, self.config.hidden_size, dtype=x.dtype, device=x.device
+            total_seq_len,
+            self.config.hidden_size,
+            dtype=x.dtype,
+            device=x.device,
         )
         linear(o, self.o_proj.weight, output, bias=residual)
         return output

@@ -1,7 +1,6 @@
-from torch.utils.data import Dataset
 import torch
-import numpy as np
 from datasets import load_dataset
+from torch.utils.data import Dataset
 
 
 def compute_max_len(file_path, tokenizer):
@@ -33,10 +32,18 @@ class PretrainDataset(Dataset):
 
         pad_id = 50257  # GPT2 vocab_size，即新增的 PAD token id
         if len(input_ids) < self.max_length:
-            input_ids = input_ids + [pad_id] * (self.max_length - len(input_ids))
+            input_ids = input_ids + [pad_id] * (
+                self.max_length - len(input_ids)
+            )
         if len(target_ids) < self.max_length:
-            target_ids = target_ids + [pad_id] * (self.max_length - len(target_ids))
+            target_ids = target_ids + [pad_id] * (
+                self.max_length - len(target_ids)
+            )
 
-        input_ids = torch.tensor(input_ids[:self.max_length], dtype=torch.long)
-        target_ids = torch.tensor(target_ids[:self.max_length], dtype=torch.long)
+        input_ids = torch.tensor(
+            input_ids[: self.max_length], dtype=torch.long
+        )
+        target_ids = torch.tensor(
+            target_ids[: self.max_length], dtype=torch.long
+        )
         return input_ids, target_ids

@@ -1,15 +1,22 @@
 import multiprocessing
-import torch
-from qwen3_from_scratch.factory import BatchConfig, GenerationDefaults
-from qwen3_from_scratch.factory.config import GenerationConfig
-from qwen3_from_scratch.inference import ModelContext, set_forward_context, get_forward_context, Sampler, TopKSampler, \
-    TemperatureSampler, GreedySampler
-from qwen3_from_scratch.inference.model_manager import ModelManager
-from qwen3_from_scratch.inference.kv_cache.paged_cache import PagedKVCache
 
-from qwen3_from_scratch.inference.logger import get_logger
-from qwen3_from_scratch.inference.sequence import Sequence
+import torch
 from torch.nn.utils.rnn import pad_sequence
+
+from qwen3_from_scratch.factory import BatchConfig, GenerationDefaults
+from qwen3_from_scratch.inference import (
+    GreedySampler,
+    ModelContext,
+    Sampler,
+    TemperatureSampler,
+    TopKSampler,
+    get_forward_context,
+    set_forward_context,
+)
+from qwen3_from_scratch.inference.kv_cache.paged_cache import PagedKVCache
+from qwen3_from_scratch.inference.logger import get_logger
+from qwen3_from_scratch.inference.model_manager import ModelManager
+from qwen3_from_scratch.inference.sequence import Sequence
 
 logger = get_logger(__name__)
 
@@ -18,13 +25,17 @@ class ModelWorker:
     def __init__(self, config: BatchConfig, model_name: str):
         self.config = config
         self.model_name = model_name
-        self.model, self.kv_cache, self.device, self.dtype = self._init_model(config, model_name)
+        self.model, self.kv_cache, self.device, self.dtype = self._init_model(
+            config, model_name
+        )
         self.sampler = self._build_sampler(config.generation)
 
     def _build_sampler(self, config: GenerationDefaults) -> Sampler:
         """根据 temperature 和 top_k 构建 Sampler。"""
         if config.temperature > 0.0 and config.top_k > 0:
-            return TopKSampler(top_k=config.top_k, temperature=config.temperature)
+            return TopKSampler(
+                top_k=config.top_k, temperature=config.temperature
+            )
         elif config.temperature > 0.0:
             return TemperatureSampler(temperature=config.temperature)
         else:
@@ -39,11 +50,20 @@ class ModelWorker:
         ava_mem = PagedKVCache.get_available_mem()
         alloc_mem = int(config.scheduler.gpu_utilization * ava_mem)
         model_config = model.config
-        blocks = PagedKVCache.get_block_num(alloc_mem, model_config.num_hidden_layers, model_config.num_key_value_heads,
-                                            model_config.hidden_size)
-        kv_cache = PagedKVCache(blocks, model_config.num_hidden_layers, model_config.num_key_value_heads,
-                                model_config.head_dim, device=model_info.device,
-                                dtype=config.kv_cache_dtype)
+        blocks = PagedKVCache.get_block_num(
+            alloc_mem,
+            model_config.num_hidden_layers,
+            model_config.num_key_value_heads,
+            model_config.hidden_size,
+        )
+        kv_cache = PagedKVCache(
+            blocks,
+            model_config.num_hidden_layers,
+            model_config.num_key_value_heads,
+            model_config.head_dim,
+            device=model_info.device,
+            dtype=config.kv_cache_dtype,
+        )
 
         return model, kv_cache, model_info.device, model_info.dtype
 
@@ -53,13 +73,18 @@ class ModelWorker:
             dtype=model_info.dtype,
             use_cache=True,
             kv_cache=self.kv_cache,
-            block_size=self.config.scheduler.block_size
+            block_size=self.config.scheduler.block_size,
         )
         set_forward_context(context)
 
     @staticmethod
-    def run(config: BatchConfig, model_name: str, request_mp: multiprocessing.Queue, result_mp: multiprocessing.Queue,
-            get_blocks_mp: multiprocessing.Queue):
+    def run(
+        config: BatchConfig,
+        model_name: str,
+        request_mp: multiprocessing.Queue,
+        result_mp: multiprocessing.Queue,
+        get_blocks_mp: multiprocessing.Queue,
+    ):
         worker = ModelWorker(config, model_name)
         worker.init_context()
         get_blocks_mp.put(worker.kv_cache.num_pages)
@@ -71,22 +96,43 @@ class ModelWorker:
             result = worker.forward(reqs)
             result_mp.put(result)
 
-    def _fill_common_context(self, context: ModelContext, seqs: list[Sequence]):
+    def _fill_common_context(
+        self, context: ModelContext, seqs: list[Sequence]
+    ):
         slot_mapping = []
         block_tables = []
         for seq in seqs:
             slots = []
             for i in range(0, len(seq), context.block_size):
                 remaining = min(len(seq) - i, context.block_size)
-                slots.extend(list(map(lambda x: seq.block_tables[i // context.block_size] * context.block_size + x,
-                                      range(remaining))))
-            slot_mapping.extend(slots[seq.cached_len:])
+                slots.extend(
+                    list(
+                        map(
+                            lambda x: (
+                                seq.block_tables[i // context.block_size]
+                                * context.block_size
+                                + x
+                            ),
+                            range(remaining),
+                        )
+                    )
+                )
+            slot_mapping.extend(slots[seq.cached_len :])
             block_tables.append(seq.block_tables)
         block_tables = pad_sequence(
-            [torch.tensor(block_table, device=self.device, dtype=torch.int32) for block_table in block_tables], True, -1)
+            [
+                torch.tensor(
+                    block_table, device=self.device, dtype=torch.int32
+                )
+                for block_table in block_tables
+            ],
+            True,
+            -1,
+        )
         context.block_tables = block_tables
-        context.slot_mapping = torch.tensor(slot_mapping, device=self.device, dtype=torch.int32)
-
+        context.slot_mapping = torch.tensor(
+            slot_mapping, device=self.device, dtype=torch.int32
+        )
 
     def build_context_prefill(self, seqs: list[Sequence]):
         context = get_forward_context()
@@ -101,9 +147,15 @@ class ModelWorker:
             cum_seq_lens_kv.append(last_cum_seq_k + len(seq.prompts))
 
         device = self.device
-        context.cum_seq_lens_kv = torch.tensor(cum_seq_lens_kv, device=device, dtype=torch.int32)
-        context.cum_seq_lens_q = torch.tensor(cum_seq_lens_q, device=device, dtype=torch.int32)
-        context.position_ids = torch.tensor(positions, device=device, dtype=torch.int32)
+        context.cum_seq_lens_kv = torch.tensor(
+            cum_seq_lens_kv, device=device, dtype=torch.int32
+        )
+        context.cum_seq_lens_q = torch.tensor(
+            cum_seq_lens_q, device=device, dtype=torch.int32
+        )
+        context.position_ids = torch.tensor(
+            positions, device=device, dtype=torch.int32
+        )
         self._fill_common_context(context, seqs)
         set_forward_context(context)
 
@@ -114,7 +166,11 @@ class ModelWorker:
         return torch.tensor(inputs, dtype=torch.int32, device=self.device)
 
     def build_inputs_decode(self, seqs: list[Sequence]):
-        return torch.tensor([seq.last_token_id for seq in seqs], device=self.device, dtype=torch.int32)
+        return torch.tensor(
+            [seq.last_token_id for seq in seqs],
+            device=self.device,
+            dtype=torch.int32,
+        )
 
     def build_context_decode(self, seqs: list[Sequence]):
         context = get_forward_context()
@@ -129,9 +185,15 @@ class ModelWorker:
             cum_seq_lens_q.append(last_cum_seq_q + 1)
             cum_seq_lens_kv.append(last_cum_seq_k + len(seq))
         self._fill_common_context(context, seqs)
-        context.cum_seq_lens_kv = torch.tensor(cum_seq_lens_kv, device=device, dtype=torch.int32)
-        context.cum_seq_lens_q = torch.tensor(cum_seq_lens_q, device=device, dtype=torch.int32)
-        context.position_ids = torch.tensor(positions, device=device, dtype=torch.int32)
+        context.cum_seq_lens_kv = torch.tensor(
+            cum_seq_lens_kv, device=device, dtype=torch.int32
+        )
+        context.cum_seq_lens_q = torch.tensor(
+            cum_seq_lens_q, device=device, dtype=torch.int32
+        )
+        context.position_ids = torch.tensor(
+            positions, device=device, dtype=torch.int32
+        )
         set_forward_context(context)
 
     def forward(self, seqs: list[Sequence]):
@@ -148,7 +210,9 @@ class ModelWorker:
         logits = self.model(inputs)
 
         if is_prefill:
-            indices = torch.tensor([len(seq) - 1 for seq in seqs], device=self.device)
+            indices = torch.tensor(
+                [len(seq) - 1 for seq in seqs], device=self.device
+            )
             logits = logits[indices]  # [B, vocab]
         next_ids = self.sampler(logits)
         return next_ids[:, 0].tolist()  # length B

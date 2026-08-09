@@ -3,6 +3,7 @@
 通过 get_rope 工厂函数获取全局共享的 RotaryEmbedding 实例，
 cos/sin 一次性预计算并注册为 buffer，后续只做索引。
 """
+
 from functools import lru_cache
 
 import torch
@@ -22,7 +23,6 @@ def apply_rotary_emb(
 
 
 class RotaryEmbedding(nn.Module):
-
     def __init__(
         self,
         head_size: int,
@@ -34,7 +34,8 @@ class RotaryEmbedding(nn.Module):
         self.head_size = head_size
         assert rotary_dim == head_size
         inv_freq = 1.0 / (
-            base ** (torch.arange(0, rotary_dim, 2, dtype=torch.float) / rotary_dim)
+            base
+            ** (torch.arange(0, rotary_dim, 2, dtype=torch.float) / rotary_dim)
         )
         t = torch.arange(max_position_embeddings, dtype=torch.float)
         freqs = torch.einsum("i,j -> ij", t, inv_freq)

@@ -1,14 +1,14 @@
-from transformers import AutoModel, AutoTokenizer
-from transformers.models.qwen3.modeling_qwen3 import Qwen3ForCausalLM
-import torch
 import json
-import jinja2
+import os
 from typing import Sequence, Type
+
+import jinja2
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from dotenv import load_dotenv
-import os
+from transformers import AutoTokenizer
+from transformers.models.qwen3.modeling_qwen3 import Qwen3ForCausalLM
 
 load_dotenv()
 
@@ -20,14 +20,21 @@ def w8_a16_lienar(weight, x, scales, bias=None):
 
 
 class W8A16Linear(nn.Module):
-    def __init__(self, in_features, out_features, bias=True, dtype=torch.float32):
+    def __init__(
+        self, in_features, out_features, bias=True, dtype=torch.float32
+    ):
         super().__init__()
         self.register_buffer(
-            "int8_weights", torch.randint(-128, 127, (out_features, in_features), dtype=torch.int8)
+            "int8_weights",
+            torch.randint(
+                -128, 127, (out_features, in_features), dtype=torch.int8
+            ),
         )
         self.register_buffer("scales", torch.randn(out_features, dtype=dtype))
         if bias:
-            self.register_buffer("bias", torch.randn(out_features, dtype=dtype))
+            self.register_buffer(
+                "bias", torch.randn(out_features, dtype=dtype)
+            )
         else:
             self.bias = None
 
@@ -38,16 +45,22 @@ class W8A16Linear(nn.Module):
         w_fp32 = weights.clone().to(torch.float32)
         scales = w_fp32.abs().max(dim=-1).values / 127
         scales = scales.to(weights.dtype)
-        int8_weights = torch.round(weights / scales.unsqueeze(-1)).to(torch.int8)
+        int8_weights = torch.round(weights / scales.unsqueeze(-1)).to(
+            torch.int8
+        )
         self.int8_weights = int8_weights
         self.scales = scales
 
 
 def replace_linear_with_target(
-    module: nn.Module, target_class: Type[nn.Module], module_name_to_exclude: Sequence[str]
+    module: nn.Module,
+    target_class: Type[nn.Module],
+    module_name_to_exclude: Sequence[str],
 ):
     for name, child in list(module.named_children()):
-        if isinstance(child, nn.Linear) and not any([x == name for x in module_name_to_exclude]):
+        if isinstance(child, nn.Linear) and not any(
+            [x == name for x in module_name_to_exclude]
+        ):
             old_bias = child.bias
             old_weight = child.weight
             new_module = target_class(
@@ -66,7 +79,10 @@ def replace_linear_with_target(
                 del old_bias
             del child
         else:
-            replace_linear_with_target(child, target_class, module_name_to_exclude)
+            replace_linear_with_target(
+                child, target_class, module_name_to_exclude
+            )
+
 
 def main():
     local_path = os.environ.get("MODEL_PATH")
@@ -74,7 +90,7 @@ def main():
     model = Qwen3ForCausalLM.from_pretrained(local_path)
     model.eval()
     replace_linear_with_target(model, W8A16Linear, ["lm_head"])
-    
+
     # 设置设备
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     model = model.to(device)
@@ -86,11 +102,11 @@ def main():
         prompt = template.render(
             messages=[{"role": "user", "content": "介绍一下你自己"}]
         )
-    
+
     # 使用 tokenizer 返回张量格式，并移动到设备
     inputs = tokenizer(prompt, return_tensors="pt")
     inputs = {k: v.to(device) for k, v in inputs.items()}
-    
+
     # 生成回复，设置必要的参数
     with torch.no_grad():
         outputs = model.generate(
@@ -99,9 +115,11 @@ def main():
             do_sample=True,
             temperature=0.7,
             top_p=0.9,
-            pad_token_id=tokenizer.pad_token_id if tokenizer.pad_token_id else tokenizer.eos_token_id,
+            pad_token_id=tokenizer.pad_token_id
+            if tokenizer.pad_token_id
+            else tokenizer.eos_token_id,
         )
-    
+
     # 解码并打印结果
     response = tokenizer.decode(outputs[0], skip_special_tokens=True)
     print(response)

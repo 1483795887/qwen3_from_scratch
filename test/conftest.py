@@ -38,6 +38,7 @@ def real_model_config(real_model_path):
     """真实模型的配置，从 real_model_path/config.json 读取。"""
     return load_from_file(os.path.join(real_model_path, "config.json"))
 
+
 def pytest_runtest_call(item):
     """
     在ops.so不存在时跳过测试
@@ -48,17 +49,23 @@ def pytest_runtest_call(item):
         item.runtest()
     except ImportError as e:
         msg = str(e)
-        if "qwen3_from_scratch.kernels.ops" in msg and 'module' in msg:
+        if "qwen3_from_scratch.kernels.ops" in msg and "module" in msg:
             pytest.skip(f"跳过测试：加载SO/组件失败，异常：{msg}")
-        if "No module named 'triton'" in msg or "No module named 'triton." in msg:
+        if (
+            "No module named 'triton'" in msg
+            or "No module named 'triton." in msg
+        ):
             pytest.skip(f"跳过测试：triton 不可用，异常：{msg}")
         raise
     except (OSError, RuntimeError) as e:
         # 补充捕获so加载的其他常见异常（如ctypes加载失败、运行时链接库缺失）
-        if "cannot open shared object file" in str(e) or "undefined symbol" in str(e):
+        if "cannot open shared object file" in str(
+            e
+        ) or "undefined symbol" in str(e):
             pytest.skip(f"跳过测试：SO运行时错误，异常：{str(e)}")
             return
         raise
+
 
 def pytest_generate_tests(metafunc):
     if "device" in metafunc.fixturenames:

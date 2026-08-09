@@ -11,7 +11,9 @@ class PreAllocatedKVCache(KVCache):
         self.v_cache: dict[int, torch.Tensor | None] = {}
         self.current_length = 0
 
-    def _initialize_cache(self, k: torch.Tensor, v: torch.Tensor, layer_idx: int):
+    def _initialize_cache(
+        self, k: torch.Tensor, v: torch.Tensor, layer_idx: int
+    ):
         if layer_idx not in self.k_cache or self.k_cache[layer_idx] is None:
             k_shape = list(k.shape)
             v_shape = list(v.shape)

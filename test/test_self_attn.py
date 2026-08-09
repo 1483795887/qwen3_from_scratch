@@ -1,4 +1,3 @@
-
 import pytest
 import torch
 from transformers import DynamicCache
@@ -148,9 +147,7 @@ def test_self_attn_output_close_to_transformers_with_kv_cache(
     context.use_cache = True
     context.cache_position = 100
 
-    past_key_values.update(
-        cache_k.transpose(1, 2), cache_v.transpose(1, 2), 3
-    )
+    past_key_values.update(cache_k.transpose(1, 2), cache_v.transpose(1, 2), 3)
 
     with torch.no_grad():
         torch.manual_seed(42)
@@ -187,7 +184,9 @@ def _build_rope_table(max_pos, head_dim, rope_theta, device, dtype):
     return emb.cos().to(dtype), emb.sin().to(dtype)
 
 
-def _create_paged_kv_cache(model_config, n_seqs, max_seq_len, block_size, device):
+def _create_paged_kv_cache(
+    model_config, n_seqs, max_seq_len, block_size, device
+):
     """创建 PagedKVCache 和 block_tables。"""
     num_heads_kv = model_config.num_key_value_heads
     head_dim = model_config.head_dim
@@ -197,8 +196,13 @@ def _create_paged_kv_cache(model_config, n_seqs, max_seq_len, block_size, device
     block_size_in_bytes = num_heads_kv * head_dim * itemsize * block_size
     mem_size = (num_pages_needed + 4) * 2 * block_size_in_bytes
     num_blocks = PagedKVCache.get_block_num(
-        mem_size=mem_size, layers=1, num_heads=num_heads_kv, head_dim=head_dim,
-        dtype=torch.float32, block_size=block_size, device=device,
+        mem_size=mem_size,
+        layers=1,
+        num_heads=num_heads_kv,
+        head_dim=head_dim,
+        dtype=torch.float32,
+        block_size=block_size,
+        device=device,
     )
     kv_cache = PagedKVCache(
         num_blocks=num_blocks,
@@ -227,7 +231,9 @@ def _build_var_len_slot_mapping(block_tables, seq_lens, block_size, device):
     return torch.tensor(slots, dtype=torch.int32, device=device)
 
 
-def _build_slot_mapping_for_positions(block_tables, positions, block_size, device):
+def _build_slot_mapping_for_positions(
+    block_tables, positions, block_size, device
+):
     """为每条序列的特定位置构建 slot_mapping，返回 (n_seqs,)。"""
     slots = []
     for b, pos in enumerate(positions):
@@ -266,7 +272,9 @@ def test_paged_self_attn_var_len_shape(model_config, device):
     n_seqs = len(seq_lens)
 
     position_ids = torch.tensor(
-        [i for n in seq_lens for i in range(n)], dtype=torch.long, device=device
+        [i for n in seq_lens for i in range(n)],
+        dtype=torch.long,
+        device=device,
     )
 
     rope_theta = model_config.pos_embed_params["rope_theta"]
@@ -283,7 +291,10 @@ def test_paged_self_attn_var_len_shape(model_config, device):
     cum_seq_lens = _build_cum_seq_lens(seq_lens, device)
 
     x = torch.randn(
-        total_seq_len, model_config.hidden_size, dtype=torch.float32, device=device
+        total_seq_len,
+        model_config.hidden_size,
+        dtype=torch.float32,
+        device=device,
     )
 
     context = ModelContext(
@@ -302,9 +313,7 @@ def test_paged_self_attn_var_len_shape(model_config, device):
         assert out.shape == (total_seq_len, model_config.hidden_size)
 
 
-def test_paged_self_attn_var_len_prefill(
-    model_config, qwen3_config, device
-):
+def test_paged_self_attn_var_len_prefill(model_config, qwen3_config, device):
     """PagedSelfAttention 变长 prefill: 2 条不同长度序列 [4, 8]，对比 HF 参考实现。"""
     layer_idx = 0
     block_size = 16
@@ -318,7 +327,9 @@ def test_paged_self_attn_var_len_prefill(
     ).to(device)
     paged_attn = paged_attn.to(torch.bfloat16).float()
 
-    off_self_attn = Qwen3Attention(qwen3_config, layer_idx=layer_idx).to(device)
+    off_self_attn = Qwen3Attention(qwen3_config, layer_idx=layer_idx).to(
+        device
+    )
     off_self_attn.load_state_dict(paged_attn.state_dict())
 
     seq_lens = [4, 8]
@@ -327,7 +338,9 @@ def test_paged_self_attn_var_len_prefill(
     n_seqs = len(seq_lens)
 
     position_ids = torch.tensor(
-        [i for n in seq_lens for i in range(n)], dtype=torch.long, device=device
+        [i for n in seq_lens for i in range(n)],
+        dtype=torch.long,
+        device=device,
     )
 
     rope_theta = model_config.pos_embed_params["rope_theta"]
@@ -345,7 +358,10 @@ def test_paged_self_attn_var_len_prefill(
 
     torch.manual_seed(42)
     x = torch.randn(
-        total_seq_len, model_config.hidden_size, dtype=torch.float32, device=device
+        total_seq_len,
+        model_config.hidden_size,
+        dtype=torch.float32,
+        device=device,
     )
 
     context = ModelContext(
@@ -385,9 +401,7 @@ def test_paged_self_attn_var_len_prefill(
     assert torch.allclose(output, ref_output, atol=1e-2)
 
 
-def test_paged_self_attn_var_len_decode(
-    model_config, qwen3_config, device
-):
+def test_paged_self_attn_var_len_decode(model_config, qwen3_config, device):
     """PagedSelfAttention 变长 decode: 2 条序列 (已有 KV 16/32)，各生成 1 个新 token。
 
     流程:
@@ -407,7 +421,9 @@ def test_paged_self_attn_var_len_decode(
     ).to(device)
     paged_attn = paged_attn.to(torch.bfloat16).float()
 
-    off_self_attn = Qwen3Attention(qwen3_config, layer_idx=layer_idx).to(device)
+    off_self_attn = Qwen3Attention(qwen3_config, layer_idx=layer_idx).to(
+        device
+    )
     off_self_attn.load_state_dict(paged_attn.state_dict())
 
     existing_lens = [16, 32]
@@ -427,7 +443,10 @@ def test_paged_self_attn_var_len_decode(
 
     torch.manual_seed(42)
     x_existing = torch.randn(
-        total_existing, model_config.hidden_size, dtype=torch.float32, device=device
+        total_existing,
+        model_config.hidden_size,
+        dtype=torch.float32,
+        device=device,
     )
     x_new = torch.randn(
         n_seqs, model_config.hidden_size, dtype=torch.float32, device=device
@@ -435,7 +454,9 @@ def test_paged_self_attn_var_len_decode(
 
     # --- Prefill: 将已有 KV 写入缓存 ---
     existing_pos_ids = torch.tensor(
-        [i for n in existing_lens for i in range(n)], dtype=torch.long, device=device
+        [i for n in existing_lens for i in range(n)],
+        dtype=torch.long,
+        device=device,
     )
     existing_slot_mapping = _build_var_len_slot_mapping(
         block_tables, existing_lens, block_size, device

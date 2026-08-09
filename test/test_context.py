@@ -1,6 +1,6 @@
 """ModelContext 字段清理测试。"""
+
 import pytest
-import torch
 
 from qwen3_from_scratch.inference.context import ModelContext
 
@@ -26,7 +26,9 @@ def test_model_context_no_num_tokens():
 def test_position_embeddings_class_removed():
     """PositionEmbeddings 类应已删除，不可导入。"""
     with pytest.raises(ImportError):
-        from qwen3_from_scratch.inference.context import PositionEmbeddings  # noqa: F401
+        from qwen3_from_scratch.inference.context import (
+            PositionEmbeddings,  # noqa: F401
+        )
 
 
 def test_model_context_retains_required_fields():

@@ -1,8 +1,6 @@
-from itertools import count
+import enum
 from copy import copy
 from uuid import uuid4
-
-import enum
 
 
 class SequenceStatus(enum.Enum):
@@ -12,7 +10,7 @@ class SequenceStatus(enum.Enum):
 
 
 class Sequence:
-    def __init__(self, prompts: list[int], req_id:str| None = None):
+    def __init__(self, prompts: list[int], req_id: str | None = None):
         if req_id is None:
             req_id = str(uuid4())
         self.req_id = req_id

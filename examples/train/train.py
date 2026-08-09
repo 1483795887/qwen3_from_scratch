@@ -1,21 +1,25 @@
-from qwen3_from_scratch.factory import ComponentFactory, ModelConfig
-from qwen3_from_scratch.models.qwen3 import Qwen3
+import argparse
+import logging
+import os
+import time
+
 import torch
-from qwen3_from_scratch.inference.context import ModelContext, set_forward_context
 import torch.nn as nn
-from torch.optim import AdamW
 from dataset import PretrainDataset
+from torch.optim import AdamW
 from torch.utils.data import DataLoader
 from tqdm import tqdm
-import argparse
-import time
-import os
 
-
-import logging
+from qwen3_from_scratch.factory import ModelConfig
+from qwen3_from_scratch.inference.context import (
+    ModelContext,
+    set_forward_context,
+)
+from qwen3_from_scratch.models.qwen3 import Qwen3
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
+
 
 def count_model_params(model: nn.Module):
     """
@@ -44,6 +48,8 @@ def count_model_params(model: nn.Module):
         f"✅ 可训练参数量: {fmt(trainable_params)} ({trainable_params:,})"
     )
     return total_params, trainable_params, info
+
+
 def build_model():
     config = ModelConfig(
         vocab_size=50258,  # GPT2分词器 + 1 (PAD token)
@@ -58,7 +64,7 @@ def build_model():
     return Qwen3(config=config)
 
 
-def train(data_path: str, save_dir: str = './output'):
+def train(data_path: str, save_dir: str = "./output"):
     model = build_model().cuda().to(torch.bfloat16)
     info = count_model_params(model)
     print(info)
@@ -83,7 +89,12 @@ def train(data_path: str, save_dir: str = './output'):
     for e in range(1):
         model.train()
         epoch_losses = []
-        pbar = tqdm(enumerate(data_loader), total=len(data_loader), desc=f'Epoch {e+1}/{EPOCHS}', leave=False)
+        pbar = tqdm(
+            enumerate(data_loader),
+            total=len(data_loader),
+            desc=f"Epoch {e + 1}/{EPOCHS}",
+            leave=False,
+        )
         for step_idx, (x, y) in pbar:
             y = y.cuda()
             optimizer.zero_grad()
@@ -98,35 +109,48 @@ def train(data_path: str, save_dir: str = './output'):
             loss.backward()
             optimizer.step()
             epoch_losses.append(loss.item())
-            pbar.set_postfix(loss=f'{loss.item():.4f}', step=step_idx)
+            pbar.set_postfix(loss=f"{loss.item():.4f}", step=step_idx)
         all_losses.extend(epoch_losses)
         total_steps += len(epoch_losses)
 
-        checkpoint_path = os.path.join(save_dir, f'checkpoint_epoch_{e+1}.pt')
+        checkpoint_path = os.path.join(
+            save_dir, f"checkpoint_epoch_{e + 1}.pt"
+        )
         torch.save(model.state_dict(), checkpoint_path)
-        logger.info(f'Saved checkpoint: {checkpoint_path}')
+        logger.info(f"Saved checkpoint: {checkpoint_path}")
 
     elapsed = time.time() - start_time
-    info_path = os.path.join(save_dir, 'training_info.txt')
-    with open(info_path, 'w') as f:
-        f.write(f'总训练批次 (epochs): {EPOCHS}\n')
-        f.write(f'总训练步数 (steps): {total_steps}\n')
-        f.write(f'总耗时: {elapsed:.2f} 秒 ({elapsed/60:.2f} 分钟)\n')
-    logger.info(f'Saved training info: {info_path}')
+    info_path = os.path.join(save_dir, "training_info.txt")
+    with open(info_path, "w") as f:
+        f.write(f"总训练批次 (epochs): {EPOCHS}\n")
+        f.write(f"总训练步数 (steps): {total_steps}\n")
+        f.write(f"总耗时: {elapsed:.2f} 秒 ({elapsed / 60:.2f} 分钟)\n")
+    logger.info(f"Saved training info: {info_path}")
 
     import matplotlib.pyplot as plt
+
     plt.figure(figsize=(10, 5))
     plt.plot(all_losses)
-    plt.xlabel('Step')
-    plt.ylabel('Loss')
-    plt.title('Training Loss')
-    plt.savefig(os.path.join(save_dir, 'training_loss.png'))
+    plt.xlabel("Step")
+    plt.ylabel("Loss")
+    plt.title("Training Loss")
+    plt.savefig(os.path.join(save_dir, "training_loss.png"))
     plt.show()
 
 
-if __name__ == '__main__':
+if __name__ == "__main__":
     parser = argparse.ArgumentParser()
-    parser.add_argument('--data_path', type=str, required=True, help='Path to the training data JSONL file')
-    parser.add_argument('--save_dir', type=str, default='./output', help='Directory to save model checkpoints and training info')
+    parser.add_argument(
+        "--data_path",
+        type=str,
+        required=True,
+        help="Path to the training data JSONL file",
+    )
+    parser.add_argument(
+        "--save_dir",
+        type=str,
+        default="./output",
+        help="Directory to save model checkpoints and training info",
+    )
     args = parser.parse_args()
     train(args.data_path, args.save_dir)

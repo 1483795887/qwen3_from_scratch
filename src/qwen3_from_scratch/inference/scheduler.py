@@ -1,8 +1,9 @@
-from qwen3_from_scratch.inference.block_manager import BlockManager
-from qwen3_from_scratch.inference.sequence import Sequence, SequenceStatus
 from collections import deque
 from dataclasses import dataclass
 from typing import Callable
+
+from qwen3_from_scratch.inference.block_manager import BlockManager
+from qwen3_from_scratch.inference.sequence import Sequence, SequenceStatus
 
 
 @dataclass
@@ -14,14 +15,20 @@ class SchedulerConfig:
 
 
 class Scheduler:
-    def __init__(self, config: SchedulerConfig, check_seq_finish_func: Callable[[Sequence], bool] = lambda seq: False):
+    def __init__(
+        self,
+        config: SchedulerConfig,
+        check_seq_finish_func: Callable[[Sequence], bool] = lambda seq: False,
+    ):
         self.check_seq_finish_func = check_seq_finish_func
         self.max_num_seqs = config.max_num_seqs
         self.max_num_tokens = config.max_num_tokens
         self.block_size = config.block_size
         self.waiting: deque[Sequence] = deque()
         self.active: deque[Sequence] = deque()
-        self.block_manager = BlockManager(num_blocks=config.max_blocks, block_size=config.block_size)
+        self.block_manager = BlockManager(
+            num_blocks=config.max_blocks, block_size=config.block_size
+        )
 
     def add_request(self, req: Sequence):
         if len(req.prompts) > self.max_num_tokens:
@@ -48,13 +55,15 @@ class Scheduler:
                     self.waiting.append(seq)
                     continue
                 self.block_manager.allocate(seq)
-            
+
             seq.status = SequenceStatus.RUNNING
             self.active.append(seq)
             seq.is_prefill = True
             scheduled_reqs.append(seq)
             batched_tokens += len(seq)
-            if (len(scheduled_reqs) >= self.max_num_seqs) or len(self.waiting) == 0:
+            if (len(scheduled_reqs) >= self.max_num_seqs) or len(
+                self.waiting
+            ) == 0:
                 break
         return scheduled_reqs
 
@@ -69,10 +78,11 @@ class Scheduler:
                 break
             self.block_manager.append_block(seq)
             scheduled_reqs.append(seq)
-            if len(scheduled_reqs) >= min(self.max_num_seqs, self.max_num_tokens):
+            if len(scheduled_reqs) >= min(
+                self.max_num_seqs, self.max_num_tokens
+            ):
                 break
         return scheduled_reqs
-
 
     def schedule(self) -> list[Sequence]:
         scheduled_reqs = self.schedule_prefill()

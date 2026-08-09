@@ -34,7 +34,9 @@ def test_torch_rms_norm_vs_transformers(model_config, component_type, device):
         component_impl=component_type,
     ).to(device)
     transformers_rms_norm = Qwen3RMSNorm(shape[-1]).to(device)
-    transformers_rms_norm.weight = nn.Parameter(torch.randn_like(transformers_rms_norm.weight))
+    transformers_rms_norm.weight = nn.Parameter(
+        torch.randn_like(transformers_rms_norm.weight)
+    )
     torch_rms_norm.load_state_dict(transformers_rms_norm.state_dict())
     with torch.no_grad():
         y_torch = torch_rms_norm(x)

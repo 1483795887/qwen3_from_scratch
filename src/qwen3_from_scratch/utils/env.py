@@ -27,4 +27,3 @@ def load_env_file(env_file_path: Optional[str] = None) -> bool:
     if not loaded:
         print(f"Warning: Failed to load environment file {env_path}")
     return loaded
-

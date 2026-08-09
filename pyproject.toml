@@ -24,16 +24,24 @@ dependencies = [
 [tool.pytest.ini_options]
 addopts = "--import-mode=importlib"
 
-[tool.black]
-line-length=79
-
+# 统一使用 ruff 作为 linter + formatter（VSCode / PyCharm 均原生支持）
 [tool.ruff]
 line-length = 79
-target-version = "py312"
+target-version = "py313"  # 与 .python-version 一致
+src = ["src"]             # src 布局，用于识别 first-party 包
+indent-width = 4
 
 [tool.ruff.lint]
 select = ["E", "F", "I"] # 开启错误、警告和 Import 排序
 ignore = ["E501"]        # 忽略单行过长的警告
+
+[tool.ruff.lint.isort]
+known-first-party = ["qwen3_from_scratch"]
+
+[tool.ruff.format]
+quote-style = "double"
+indent-style = "space"
+line-ending = "lf"
 
 [dependency-groups]
 dev = [

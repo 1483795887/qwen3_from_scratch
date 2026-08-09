@@ -1,7 +1,9 @@
+import math
+
+import torch
 import triton
 import triton.language as tl
-import torch
-import math
+
 
 @triton.jit
 def load_paged_memory(
@@ -12,7 +14,7 @@ def load_paged_memory(
     NUM_HEADS: tl.constexpr,
     PAGE_BLOCK_SIZE: tl.constexpr,
     HEAD_DIM: tl.constexpr,
-    BLOCK_SIZE_N: tl.constexpr
+    BLOCK_SIZE_N: tl.constexpr,
 ):
     """
     cache: 是PagedAttention的K/V缓存, 总体形状为 (NUM_BLOCKS, NUM_HEADS, BLOCK_SIZE_N),
@@ -46,10 +48,14 @@ def load_paged_memory(
             + block_offset
         )
         block_data = tl.load(
-            cache
-            + global_row_offsets * HIDDEN_DIM
-            + dim_offsets[None, :],
-            mask=((row_offsets[:, None]) < tl.minimum(i_size, loaded_rows + PAGE_BLOCK_SIZE - block_offset)) & (row_offsets[:, None] >= loaded_rows),
+            cache + global_row_offsets * HIDDEN_DIM + dim_offsets[None, :],
+            mask=(
+                (row_offsets[:, None])
+                < tl.minimum(
+                    i_size, loaded_rows + PAGE_BLOCK_SIZE - block_offset
+                )
+            )
+            & (row_offsets[:, None] >= loaded_rows),
             other=0.0,
         )
         result += block_data
@@ -106,8 +112,9 @@ def flash_attention_intr(
     if STAGE == 1:
         lo, hi = 0, tl.minimum(m_start, N_KEY)
     elif STAGE == 2:
-        lo, hi = tl.minimum(m_start, N_KEY), tl.minimum(
-            m_start + BLOCK_SIZE_M, N_KEY
+        lo, hi = (
+            tl.minimum(m_start, N_KEY),
+            tl.minimum(m_start + BLOCK_SIZE_M, N_KEY),
         )
     else:
         lo, hi = 0, N_KEY
@@ -218,7 +225,9 @@ def flash_attn_varlen_kernel(
         V_ptr = V + h_id_kv * HEAD_DIM
     O_ptr = output + cu_seqlen_q_start * HIDDEN_DIM_Q + h_id * HEAD_DIM
     if block_tables is not None:
-        num_blocks_per_seq = (max_seq_len_k + PAGE_BLOCK_SIZE - 1) // PAGE_BLOCK_SIZE
+        num_blocks_per_seq = (
+            max_seq_len_k + PAGE_BLOCK_SIZE - 1
+        ) // PAGE_BLOCK_SIZE
         block_tables = block_tables + b_id * num_blocks_per_seq
 
     offsets_qm = n_q_id * BLOCK_SIZE_M + tl.arange(0, BLOCK_SIZE_M)
@@ -310,7 +319,7 @@ def flash_attn_varlen_func(
     cu_seqlens_q: torch.Tensor,
     max_seqlen_k: int,
     cu_seqlens_k: torch.Tensor,
-    softmax_scale:float,
+    softmax_scale: float,
     causal: bool,
     block_table: torch.Tensor | None = None,
 ):
@@ -330,11 +339,19 @@ def flash_attn_varlen_func(
         PAGE_BLOCK_SIZE = k.shape[1]
         H_k = k.shape[2]
         cache_type = 1
-    grid = [triton.cdiv(max_seqlen_q, BLOCK_SIZE_M), H_q, cu_seqlens_q.shape[0] - 1]
+    grid = [
+        triton.cdiv(max_seqlen_q, BLOCK_SIZE_M),
+        H_q,
+        cu_seqlens_q.shape[0] - 1,
+    ]
     output = torch.empty_like(q)
     flash_attn_varlen_kernel[grid](
-        q, k, v, output,
-        cu_seqlens_q, cu_seqlens_k,
+        q,
+        k,
+        v,
+        output,
+        cu_seqlens_q,
+        cu_seqlens_k,
         max_seqlen_k,
         softmax_scale,
         block_table,
@@ -345,7 +362,7 @@ def flash_attn_varlen_func(
         D,
         BLOCK_SIZE_M,
         BLOCK_SIZE_N,
-        PAGE_BLOCK_SIZE
+        PAGE_BLOCK_SIZE,
     )
 
     return output
@@ -353,19 +370,14 @@ def flash_attn_varlen_func(
 
 @triton.jit
 def _update_paged_kv_cache_kernel(
-    k_cache,
-    v_cache,
-    k,
-    v,
-    slot_mapping,
-    HIDDEN_DIM: tl.constexpr
+    k_cache, v_cache, k, v, slot_mapping, HIDDEN_DIM: tl.constexpr
 ):
     n_id = tl.program_id(0)
 
     slot = tl.load(slot_mapping + n_id)
     if slot < 0:
         return
-    offsets =  tl.arange(0, HIDDEN_DIM)
+    offsets = tl.arange(0, HIDDEN_DIM)
     k_cache_ptr = k_cache + (slot * HIDDEN_DIM + offsets)
     v_cache_ptr = v_cache + (slot * HIDDEN_DIM + offsets)
     k_ptr = k + (n_id * HIDDEN_DIM + offsets)
@@ -373,10 +385,11 @@ def _update_paged_kv_cache_kernel(
 
     item_k = tl.load(k_ptr)
     item_v = tl.load(v_ptr)
-    
+
     target_dtype = k_cache.dtype.element_ty
     tl.store(k_cache_ptr, item_k.to(target_dtype))
     tl.store(v_cache_ptr, item_v.to(target_dtype))
+
 
 def update_paged_kv_cache(
     k_cache: torch.Tensor,
