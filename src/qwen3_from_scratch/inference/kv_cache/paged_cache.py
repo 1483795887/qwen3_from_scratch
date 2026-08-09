@@ -5,16 +5,21 @@ from ..context import get_forward_context
 
 
 class PagedKVCache(KVCache):
-    def __init__(self, mem_size: int, layers: int, num_heads: int, head_dim: int, dtype: torch.dtype = torch.float32,
+    def __init__(self, num_blocks: int, layers: int, num_heads: int, head_dim: int, dtype: torch.dtype = torch.float32,
+                 block_size: int = 16, device="cuda"):
+        kv_cache = torch.empty((2, layers, num_blocks, block_size, num_heads, head_dim), dtype=dtype, device=device)
+        self.block_size = block_size
+        self.page_size = block_size
+        self.num_pages = num_blocks
+        self.k_cache = kv_cache[0]  # (layers, num_pages, block_size, num_heads, head_dim)
+        self.v_cache = kv_cache[1]
+
+    @staticmethod
+    def get_block_num(mem_size: int, layers: int, num_heads: int, head_dim: int, dtype: torch.dtype = torch.float32,
                  block_size: int = 16, device="cuda"):
         block_size_in_bytes = layers * num_heads * head_dim * dtype.itemsize * block_size
         num_pages = mem_size // block_size_in_bytes // 2
-        kv_cache = torch.empty((2, layers, num_pages, block_size, num_heads, head_dim), dtype=dtype, device=device)
-        self.block_size = block_size
-        self.page_size = block_size
-        self.num_pages = num_pages
-        self.k_cache = kv_cache[0]  # (layers, num_pages, block_size, num_heads, head_dim)
-        self.v_cache = kv_cache[1]
+        return num_pages
 
     def _update_var_len(self, k: torch.Tensor, v: torch.Tensor, layer_idx: int):
         """

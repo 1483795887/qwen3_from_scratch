@@ -464,9 +464,14 @@ class PagedInferenceEngine:
         self.model = model
         self.config = config
         self.block_size = block_size
-        self.block_manager = BlockManager(num_pages, block_size)
+        num_blocks = PagedKVCache.get_block_num(
+            mem_size, config.num_hidden_layers,
+            config.num_key_value_heads, config.head_dim,
+            block_size=block_size,
+        )
+        self.block_manager = BlockManager(num_blocks, block_size)
         self.scheduler = Scheduler(self.block_manager)
-        self.kv_cache = PagedKVCache(mem_size, config.num_hidden_layers,
+        self.kv_cache = PagedKVCache(num_blocks, config.num_hidden_layers,
                                       config.num_key_value_heads, config.head_dim,
                                       block_size=block_size)
         self._context = ModelContext(
