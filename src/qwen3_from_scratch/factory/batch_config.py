@@ -33,6 +33,50 @@ import yaml
 from .config import ComponentConfig
 from .config import load_from_file as load_model_config
 
+# ── dtype 解析 ────────────────────────────────
+
+_DTYPE_ALIASES: Dict[str, torch.dtype] = {
+    "bf16": torch.bfloat16,
+    "bfloat16": torch.bfloat16,
+    "fp16": torch.float16,
+    "float16": torch.float16,
+    "half": torch.float16,
+    "fp32": torch.float32,
+    "float32": torch.float32,
+    "float": torch.float32,
+}
+
+# 反向映射：torch.dtype → 规范字符串（用于保存）
+_DTYPE_TO_STR: Dict[torch.dtype, str] = {
+    torch.bfloat16: "bfloat16",
+    torch.float16: "float16",
+    torch.float32: "float32",
+}
+
+
+def _parse_dtype(value: Any) -> torch.dtype:
+    """将 YAML 中的 dtype 配置解析为 torch.dtype。
+
+    接受：
+      - str:  "bf16", "bfloat16", "fp16", "float16", "fp32", "float32" 等
+      - torch.dtype: 直接返回
+    """
+    if isinstance(value, torch.dtype):
+        return value
+    if isinstance(value, str):
+        key = value.strip().lower()
+        if key not in _DTYPE_ALIASES:
+            raise ValueError(
+                f"不支持的 dtype '{value}'。"
+                f"有效值: {sorted(_DTYPE_ALIASES.keys())}"
+            )
+        return _DTYPE_ALIASES[key]
+    raise ValueError(
+        f"kv_cache_dtype 必须是 str 或 torch.dtype，得到: "
+        f"{type(value).__name__}"
+    )
+
+
 # ── 采样参数 ──────────────────────────────────
 
 
@@ -92,6 +136,13 @@ class ResolvedModelEntry:
     generation: GenerationDefaults
 
 
+@dataclass
+class SchedulerDefaults:
+    max_num_seqs: int = 32
+    max_num_tokens: int = 3000
+    block_size: int = 16
+    gpu_utilization: float = 0.5
+
 # ── 顶层配置 ──────────────────────────────────
 
 
@@ -104,6 +155,8 @@ class BatchConfig:
 
     generation: GenerationDefaults = field(default_factory=GenerationDefaults)
     models: List[ModelEntry] = field(default_factory=list)
+    scheduler: SchedulerDefaults = field(default_factory=SchedulerDefaults)
+    kv_cache_dtype: torch.dtype = torch.bfloat16
 
     def get_model(self, name: str) -> ResolvedModelEntry:
         """按 name 查找模型，返回已合并的 ResolvedModelEntry。"""
@@ -203,6 +256,18 @@ def load_batch_config(config_path: str) -> BatchConfig:
         max_new_tokens=gen_raw.get("max_new_tokens", 100),
     )
 
+    # 解析调度配置
+    scheduler_raw = raw.get("scheduler", {}) or {}
+    scheduler = SchedulerDefaults(
+        max_num_seqs=scheduler_raw.get("max_num_seqs", 32),
+        max_num_tokens=scheduler_raw.get("max_num_tokens", 3000),
+        block_size=scheduler_raw.get("block_size", 16),
+        gpu_utilization=scheduler_raw.get("gpu_utilization", 0.5)
+    )
+
+    # 解析 KVCache dtype
+    kv_cache_dtype = _parse_dtype(raw.get("kv_cache_dtype", "bfloat16"))
+
     # 解析 models
     models_raw = raw.get("models", [])
     if not isinstance(models_raw, list):
@@ -254,7 +319,12 @@ def load_batch_config(config_path: str) -> BatchConfig:
             )
         )
 
-    config = BatchConfig(generation=generation, models=models)
+    config = BatchConfig(
+        generation=generation,
+        models=models,
+        scheduler=scheduler,
+        kv_cache_dtype=kv_cache_dtype,
+    )
     _validate(config)
     return config
 

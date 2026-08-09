@@ -12,8 +12,10 @@ class SequenceStatus(enum.Enum):
 
 
 class Sequence:
-    def __init__(self, prompts: list[int]):
-        self.req_id = str(uuid4())
+    def __init__(self, prompts: list[int], req_id:str| None = None):
+        if req_id is None:
+            req_id = str(uuid4())
+        self.req_id = req_id
         self.prompts = prompts
         self.token_ids = copy(prompts)
         self.last_token_id = -1
@@ -23,3 +25,7 @@ class Sequence:
 
     def __len__(self):
         return len(self.token_ids)
+
+    @property
+    def generated_lens(self):
+        return len(self) - len(self.prompts)

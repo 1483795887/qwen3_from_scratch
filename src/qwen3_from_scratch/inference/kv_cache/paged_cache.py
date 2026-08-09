@@ -1,3 +1,6 @@
+import os
+import sys
+
 import torch
 
 from .kv_cache import KVCache
@@ -20,6 +23,40 @@ class PagedKVCache(KVCache):
         block_size_in_bytes = layers * num_heads * head_dim * dtype.itemsize * block_size
         num_pages = mem_size // block_size_in_bytes // 2
         return num_pages
+
+    @staticmethod
+    def get_available_mem() -> int:
+        """获取可用显存/内存，以字节为单位。
+
+        有 CUDA 设备时返回可用显存，否则返回可用系统内存。
+        """
+        if torch.cuda.is_available():
+            free, _total = torch.cuda.mem_get_info()
+            return free
+
+        if sys.platform == "win32":
+            import ctypes
+
+            class MEMORYSTATUSEX(ctypes.Structure):
+                _fields_ = [
+                    ("dwLength", ctypes.c_ulong),
+                    ("dwMemoryLoad", ctypes.c_ulong),
+                    ("ullTotalPhys", ctypes.c_ulonglong),
+                    ("ullAvailPhys", ctypes.c_ulonglong),
+                    ("ullTotalPageFile", ctypes.c_ulonglong),
+                    ("ullAvailPageFile", ctypes.c_ulonglong),
+                    ("ullTotalVirtual", ctypes.c_ulonglong),
+                    ("ullAvailVirtual", ctypes.c_ulonglong),
+                    ("ullAvailExtendedVirtual", ctypes.c_ulonglong),
+                ]
+
+            stat = MEMORYSTATUSEX()
+            stat.dwLength = ctypes.sizeof(MEMORYSTATUSEX)
+            ctypes.windll.kernel32.GlobalMemoryStatusEx(ctypes.byref(stat))
+            return stat.ullAvailPhys
+
+        # Linux/Unix
+        return os.sysconf("SC_AVPHYS_PAGES") * os.sysconf("SC_PAGE_SIZE")
 
     def _update_var_len(self, k: torch.Tensor, v: torch.Tensor, layer_idx: int):
         """
