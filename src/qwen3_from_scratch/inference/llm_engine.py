@@ -9,7 +9,6 @@ from qwen3_from_scratch.inference.model_worker import ModelWorker
 from qwen3_from_scratch.inference.sequence import Sequence, SequenceStatus
 from qwen3_from_scratch.inference.scheduler import Scheduler, SchedulerConfig
 import multiprocessing as mp
-from queue import Queue
 from asyncio import Queue, AbstractEventLoop
 from dataclasses import dataclass
 
@@ -44,20 +43,20 @@ class LLMEngine:
         self.request_queue = mp.Queue()
         self.response_queue = mp.Queue()
         self.get_blocks_queue = mp.Queue()
-        self.worker_process = None
         self.num_blocks = 0
 
         self.requests: dict[str, Request] = {}
-        self.setup_worker(self.config, model_name)
         self.thread = threading.Thread(target=self.run)
         self.thread.start()
+        self.finished = False
 
     def setup_worker(self, config: BatchConfig, model_name: str):
-        self.worker_process = mp.Process(
+        worker_process = mp.Process(
             target=ModelWorker.run,
             args=(config, model_name, self.request_queue, self.response_queue, self.get_blocks_queue)
         )
-        self.worker_process.start()
+        worker_process.start()
+        return worker_process
 
     def _decode_and_send_result(self, tokens:list[int], request:Request):
         result = self.tokenizer.decode(tokens, skip_special_tokens=True)
@@ -104,14 +103,18 @@ class LLMEngine:
         return result
 
     def run(self):
+        self.setup_worker(self.config, self.model_name)
+        logger.info("等待模型启动中")
         blocks = self.get_blocks_queue.get()
+        logger.info(f"可用块数:{blocks}")
         scheduler = Scheduler(SchedulerConfig(self.config.scheduler.max_num_seqs, self.config.scheduler.max_num_tokens,
                                               self.config.scheduler.block_size, blocks),
                               check_seq_finish_func=self._check_seq_finish)
-        while True:
+        while not self.finished:
             # 接收请求
             reqs = self._get_incoming_requests()
-            logger.debug(f"get {len(reqs)} reqs")
+            if reqs:
+                logger.debug(f"get {len(reqs)} reqs")
             for req in reqs:
                 token_ids = self.tokenizer(req.prompt)
                 seq = Sequence(token_ids.input_ids, req_id=req.req_id)
@@ -126,9 +129,16 @@ class LLMEngine:
             result_token_ids = self.response_queue.get()
             scheduler.post_process(seqs, result_token_ids)
             self._post_process(seqs)
+        # 约定，发送长度为0的就是结束
+        self.request_queue.put([])
 
-    async def generate_stream(self, prompt:str):
+
+    async def generate_stream(self, prompt:str|list[dict]):
         queue: asyncio.Queue[RequestResult] = asyncio.Queue()
+        if isinstance(prompt, list):
+            prompt = self.tokenizer.apply_chat_template(
+                prompt, tokenize=False, add_generation_prompt=True
+            )
         request = Request(prompt, asyncio.get_event_loop(), queue, True)
         logger.debug(f"put req: {request.req_id}")
         await self.incoming_requests.put(request)
@@ -137,3 +147,9 @@ class LLMEngine:
             if item.is_finished:
                 break
             yield item.delta
+
+    def close(self):
+        self.finished = True
+        self.thread.join()
+        # 约定，发送长度为0的就是结束
+        self.request_queue.put([])

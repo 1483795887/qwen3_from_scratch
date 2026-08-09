@@ -371,7 +371,7 @@ class VarLenPagedAttn(MyAttn):
 
                         factor = torch.exp(max_val - curr_max)
                         dominator = dominator * factor + curr_dominator
-                        curr_output = factor * curr_output + attn_score @ sub_v
+                        curr_output = factor * curr_output + attn_score.to(sub_v.dtype) @ sub_v
 
                         max_val = curr_max
                     output[m:m + curr_m_span, h] = curr_output / dominator

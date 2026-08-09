@@ -16,6 +16,7 @@ class PagedKVCache(KVCache):
         self.num_pages = num_blocks
         self.k_cache = kv_cache[0]  # (layers, num_pages, block_size, num_heads, head_dim)
         self.v_cache = kv_cache[1]
+        self.dtype = dtype
 
     @staticmethod
     def get_block_num(mem_size: int, layers: int, num_heads: int, head_dim: int, dtype: torch.dtype = torch.float32,
@@ -85,8 +86,8 @@ class PagedKVCache(KVCache):
             if slot == -1:
                 continue
             block_id, slot_id = slot // self.block_size, slot % self.block_size
-            self.k_cache[layer_idx, block_id, slot_id] = k[i]
-            self.v_cache[layer_idx, block_id, slot_id] = v[i]
+            self.k_cache[layer_idx, block_id, slot_id] = k[i].to(self.dtype)
+            self.v_cache[layer_idx, block_id, slot_id] = v[i].to(self.dtype)
         return k,v
 
     def update(self, k: torch.Tensor, v: torch.Tensor, layer_idx: int, cache_pos: int = 0) -> tuple[

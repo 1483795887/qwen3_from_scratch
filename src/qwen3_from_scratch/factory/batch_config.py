@@ -117,6 +117,7 @@ class ModelEntry:
     path: str
     device: str = "cpu"
     max_len: int = 2048
+    dtype: torch.dtype = torch.bfloat16
     components: Dict[str, ComponentConfig] = field(default_factory=dict)
     generation: Optional[GenerationOverrides] = None
 
@@ -132,6 +133,7 @@ class ResolvedModelEntry:
     path: str
     device: str
     max_len: int
+    dtype: torch.dtype
     components: Dict[str, ComponentConfig]
     generation: GenerationDefaults
 
@@ -167,6 +169,7 @@ class BatchConfig:
                     name=m.name,
                     path=m.path,
                     device=m.device,
+                    dtype=m.dtype,
                     max_len=m.max_len,
                     components=dict(m.components),
                     generation=merged,
@@ -279,7 +282,7 @@ def load_batch_config(config_path: str) -> BatchConfig:
             raise ValueError(f"models[{i}] 必须是字典")
 
         # 必填字段
-        for key in ("name", "path", "max_len"):
+        for key in ("name", "path"):
             if key not in m:
                 raise ValueError(
                     f"models[{i}] (name={m.get('name', '?')}): "
@@ -313,7 +316,8 @@ def load_batch_config(config_path: str) -> BatchConfig:
                 name=m["name"],
                 path=m["path"],
                 device=m.get("device", "cpu"),
-                max_len=m["max_len"],
+                dtype=_parse_dtype(m.get("dtype", "bfloat16")),
+                max_len=m.get("max_len", 2048),
                 components=components,
                 generation=gen_override,
             )

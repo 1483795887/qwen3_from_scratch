@@ -51,7 +51,7 @@ class Scheduler:
             
             seq.status = SequenceStatus.RUNNING
             self.active.append(seq)
-            seq.is_prefill = False
+            seq.is_prefill = True
             scheduled_reqs.append(seq)
             batched_tokens += len(seq)
             if (len(scheduled_reqs) >= self.max_num_seqs) or len(self.waiting) == 0:
@@ -85,6 +85,11 @@ class Scheduler:
         for seq, token_id in zip(seqs, token_ids):
             seq.last_token_id = token_id
             seq.token_ids.append(token_id)
+            if seq.is_prefill:
+                seq.cached_len = len(seq.prompts)
+                seq.is_prefill = False
+            else:
+                seq.cached_len += 1
             if self.check_seq_finish_func(seq):
                 seq.status = SequenceStatus.FINISHED
                 if seq in self.active:

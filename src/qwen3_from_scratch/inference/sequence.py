@@ -19,6 +19,7 @@ class Sequence:
         self.prompts = prompts
         self.token_ids = copy(prompts)
         self.last_token_id = -1
+        self.cached_len = 0
         self.block_tables: list[int] = []
         self.status = SequenceStatus.WAITING
         self.is_prefill = True
