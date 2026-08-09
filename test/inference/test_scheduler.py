@@ -1,15 +1,16 @@
 from qwen3_from_scratch.inference.scheduler import SchedulerConfig, Scheduler
 from qwen3_from_scratch.inference.sequence import Sequence, SequenceStatus
+from typing import Callable
 
 
-def make_scheduler(num_pages: int = 100, block_size: int = 16, max_num_seqs: int = 8, max_num_tokens=100) -> Scheduler:
+def make_scheduler(num_pages: int = 100, block_size: int = 16, max_num_seqs: int = 8, max_num_tokens=100, check_seq_finish_func: Callable[[Sequence], bool] = lambda seq: False) -> Scheduler:
     config = SchedulerConfig(
         max_num_seqs=max_num_seqs,
         max_num_tokens=max_num_tokens,
         block_size=block_size,
         max_blocks=num_pages
     )
-    return Scheduler(config)
+    return Scheduler(config, check_seq_finish_func)
 
 
 class TestAddRequest:
@@ -55,7 +56,7 @@ class TestSchedule:
         scheduled_seq = scheduled_seqs[0]
         assert scheduled_seq.req_id == seq.req_id
         assert scheduled_seq.block_tables is not None
-        assert scheduled_seq.is_prefill
+        assert not scheduled_seq.is_prefill
         assert scheduled_seq.status == SequenceStatus.RUNNING
 
     def test_restricted_by_max_seq_num(self):
@@ -106,5 +107,46 @@ class TestSchedule:
         reqs = scheduler.schedule()
         assert len(reqs) == 0
 
+    def test_schedule_prefill_first(self):
+        seqs = [Sequence([0]* 32) for _ in range(2)]
+        check_seq_finish_func = lambda seq: seq.req_id == seqs[0].req_id
+        scheduler = make_scheduler(check_seq_finish_func=check_seq_finish_func)
+        scheduler.add_request(seqs[0])
+        scheduler.add_request(seqs[1])
+        reqs = scheduler.schedule()
+        assert len(reqs) == 2
+        scheduler.post_process(reqs, [0,0])
+        # 此时第一个序列完成，第二个变成 decode
+        seq3 = Sequence([0]*32)
+        scheduler.add_request(seq3)
+        # 混合都有的情况下，优先调度 prefill 序列
+        reqs = scheduler.schedule()
+        assert len(reqs) == 1
+        assert reqs[0].req_id == seq3.req_id
+
+
 class TestPostProcess:
-    pass
+    def test_append_token_id(self):
+        scheduler = make_scheduler()
+        seqs = [Sequence([0]* 32) for _ in range(100)]
+        scheduler.post_process(seqs, [0]*len(seqs))
+        assert len(seqs[0].token_ids) == 33
+
+    def test_check_seq_finish_func(self):
+        seqs = [Sequence([0]* 32) for _ in range(100)]
+        check_seq_finish_func = lambda seq: seq.req_id == seqs[0].req_id
+        scheduler = make_scheduler(check_seq_finish_func=check_seq_finish_func)
+        scheduler.post_process(seqs, [0]*len(seqs))
+        assert seqs[0].status == SequenceStatus.FINISHED
+
+    def test_check_can_schedule_more_when_finish(self):
+        seqs = [Sequence([0]* 32) for _ in range(2)]
+        check_seq_finish_func = lambda seq: seq.req_id == seqs[0].req_id
+        scheduler = make_scheduler(check_seq_finish_func=check_seq_finish_func, num_pages=2)
+        scheduler.add_request(seqs[0])
+        scheduler.add_request(seqs[1])
+        reqs = scheduler.schedule()
+        assert len(reqs) == 1
+        scheduler.post_process(reqs[:1],[0])
+        reqs = scheduler.schedule()
+        assert len(reqs) == 1

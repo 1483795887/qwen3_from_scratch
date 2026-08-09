@@ -2,6 +2,7 @@ from qwen3_from_scratch.inference.block_manager import BlockManager
 from qwen3_from_scratch.inference.sequence import Sequence, SequenceStatus
 from collections import deque
 from dataclasses import dataclass
+from typing import Callable
 
 
 @dataclass
@@ -13,7 +14,8 @@ class SchedulerConfig:
 
 
 class Scheduler:
-    def __init__(self, config: SchedulerConfig):
+    def __init__(self, config: SchedulerConfig, check_seq_finish_func: Callable[[Sequence], bool] = lambda seq: False):
+        self.check_seq_finish_func = check_seq_finish_func
         self.max_num_seqs = config.max_num_seqs
         self.max_num_tokens = config.max_num_tokens
         self.block_size = config.block_size
@@ -49,6 +51,7 @@ class Scheduler:
             
             seq.status = SequenceStatus.RUNNING
             self.active.append(seq)
+            seq.is_prefill = False
             scheduled_reqs.append(seq)
             batched_tokens += len(seq)
             if (len(scheduled_reqs) >= self.max_num_seqs) or len(self.waiting) == 0:
@@ -62,5 +65,12 @@ class Scheduler:
             return scheduled_reqs
         return []
 
-    def post_process(self, seqs: list[Sequence], token_ids: list[int], is_prefill: bool):
-        pass
+    def post_process(self, seqs: list[Sequence], token_ids: list[int]):
+        for seq, token_id in zip(seqs, token_ids):
+            seq.last_token_id = token_id
+            seq.token_ids.append(token_id)
+            if self.check_seq_finish_func(seq):
+                seq.status = SequenceStatus.FINISHED
+                if seq in self.active:
+                    self.active.remove(seq)
+                self.block_manager.deallocate(seq)
