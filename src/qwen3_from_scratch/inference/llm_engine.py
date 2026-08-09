@@ -66,6 +66,7 @@ class LLMEngine:
         self.num_blocks = 0
 
         self.requests: dict[str, Request] = {}
+        self._ready_event = threading.Event()
         self.thread = threading.Thread(target=self.run)
         self.thread.start()
         self.finished = False
@@ -130,6 +131,8 @@ class LLMEngine:
         scheduler = Scheduler(SchedulerConfig(self.config.scheduler.max_num_seqs, self.config.scheduler.max_num_tokens,
                                               self.config.scheduler.block_size, blocks),
                               check_seq_finish_func=self._check_seq_finish)
+        # worker 已加载完模型并上报块数，此后请求的 TTFT 不再包含加载耗时
+        self._ready_event.set()
         while not self.finished:
             # 接收请求
             reqs = self._get_incoming_requests()
@@ -199,6 +202,32 @@ class LLMEngine:
                 )
 
             yield StreamChunk(delta=item.delta, metrics=metrics)
+
+    def wait_ready(self):
+        """阻塞直到推理进程完成模型加载。
+
+        模型加载发生在 worker 进程，若在就绪前发请求，加载耗时会被计入 TTFT。
+        调用本方法后，后续请求的 TTFT 不再包含加载耗时。
+        """
+        self._ready_event.wait()
+        logger.info("模型加载完成")
+
+    async def warmup(self, prompt: str = "你好", num_tokens: int = 3):
+        """等待模型就绪并跑一轮预热请求（prefill + 若干 decode 步）。
+
+        预热可同时触发 Triton 内核编译，避免首轮请求的 TTFT 被编译耗时污染。
+        应在真实请求之前调用。预热期间会临时调低 max_new_tokens 以保持快速，结束后恢复。
+        """
+        self.wait_ready()
+        logger.info("开始预热")
+        old_max_tokens = self.config.generation.max_new_tokens
+        try:
+            self.config.generation.max_new_tokens = num_tokens
+            async for _ in self.generate_stream(prompt):
+                pass
+        finally:
+            self.config.generation.max_new_tokens = old_max_tokens
+        logger.info("预热完成")
 
     def close(self):
         self.finished = True
