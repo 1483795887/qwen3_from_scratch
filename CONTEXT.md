@@ -10,8 +10,12 @@
 单请求推理引擎，继承自原 `InferenceEngine`。使用 BHSD 张量布局、`PreAllocatedKVCache`、SDPA/Triton flash attention。接口：`prefill` / `step` / `generate` / `generate_stream`。
 _Avoid_: InferenceEngine, InferenceSession
 
+**LLMEngine**:
+高层异步推理引擎，面向调用方。内部驱动后台 `threading.Thread`（调度循环）+ `mp.Process`（`ModelWorker`）+ `Scheduler` + `PagedKVCache` 完成多请求推理。接口：`generate_stream`（async，yield `StreamChunk`）/ `close`。
+_Avoid_: InferenceEngine, Engine, LLMServer
+
 **PackedRunner**:
-多请求变长推理引擎。使用 SHD 张量布局、`PagedKVCache`、`VarLenPagedAttn`。接口：`add_request` / `step` / `generate`。
+多请求变长推理引擎（待实现）。使用 SHD 张量布局、`PagedKVCache`、`VarLenPagedAttn`。接口：`add_request` / `step` / `generate`。
 _Avoid_: PagedInferenceEngine
 
 **Runner**:
@@ -87,6 +91,24 @@ _Avoid_: ModelEntry（未合并，不直接用于构建 Runner）
 **PackedConfig**:
 Packed 模式的多模型配置文件（待实现）。与 `BatchConfig` 完全分离，不共享基类。将含 `kv_cache_memory_utilization` 等 Packed 模式专用推理参数。
 _Avoid_: BatchConfig（两种配置各自独立）
+
+### 性能指标
+
+**StreamChunk**:
+`LLMEngine.generate_stream` 的 yield 单元。包含 `delta`（解码文本片段）和 `metrics`（`PerfMetrics` 快照）。替代原先直接 yield `str` 的接口。
+_Avoid_: RequestResult（内部消息传递单元，不暴露给调用方）, Chunk, TokenResult
+
+**PerfMetrics**:
+单次请求的运行时性能指标快照，每个 chunk 更新。字段：`ttft`（首词延迟，秒）、`token_count`（已生成 token 数）、`tps`（解码阶段 running 平均 tokens/sec）、`total_elapsed`（从 `generate_stream` 调用到此 chunk 的总耗时，秒）。全部基于 consumer 侧 wall-clock 测量。
+_Avoid_: PerfStats, Metrics, TimingInfo
+
+**Wall-clock TTFT**:
+从调用方 `generate_stream()` 到收到第一个 `StreamChunk.delta` 的时间。包含 asyncio Queue 排队、tokenize、Scheduler 等待、`mp.Queue` 序列化传输、GPU prefill 计算、回传的全部开销。是调用方真实感受到的延迟。
+_Avoid_: Compute TTFT（仅 Worker 进程内的纯计算时间，本项目不采集）, Prefill time
+
+**Effective TPS**:
+解码阶段 running 平均速度 = `(token_count - 1) / (最后一个 delta 时间 - 第一个 delta 时间)`。包含批处理干扰（其他请求占用 GPU）和 IPC 开销。第一个 chunk 的 TPS 为 `0.0`（尚无 decode 阶段）。
+_Avoid_: Pure decode TPS（仅模型 forward 时间的倒数，本项目不采集）, Instantaneous TPS
 
 ### 核心原则
 

@@ -10,6 +10,7 @@ from qwen3_from_scratch.inference.sequence import Sequence, SequenceStatus
 from qwen3_from_scratch.inference.scheduler import Scheduler, SchedulerConfig
 import multiprocessing as mp
 from asyncio import Queue, AbstractEventLoop
+from collections.abc import AsyncIterator
 from dataclasses import dataclass
 
 from qwen3_from_scratch.inference.logger import get_logger
@@ -29,6 +30,25 @@ class Request:
         self.loop = loop
         self.queue = queue
         self.is_streaming = is_streaming
+
+
+@dataclass
+class PerfMetrics:
+    """单次请求的运行时性能指标快照，每个 chunk 更新。
+
+    全部基于 consumer 侧 wall-clock 测量（见 CONTEXT.md）。
+    """
+    ttft: float
+    token_count: int
+    tps: float
+    total_elapsed: float
+
+
+@dataclass
+class StreamChunk:
+    """generate_stream 的每次 yield 单元。"""
+    delta: str
+    metrics: PerfMetrics
 
 
 class LLMEngine:
@@ -133,7 +153,8 @@ class LLMEngine:
         self.request_queue.put([])
 
 
-    async def generate_stream(self, prompt:str|list[dict]):
+    async def generate_stream(self, prompt: str | list[dict]) -> AsyncIterator[StreamChunk]:
+        """异步流式生成，yield StreamChunk（解码文本 + 性能指标）。"""
         queue: asyncio.Queue[RequestResult] = asyncio.Queue()
         if isinstance(prompt, list):
             prompt = self.tokenizer.apply_chat_template(
@@ -141,12 +162,43 @@ class LLMEngine:
             )
         request = Request(prompt, asyncio.get_event_loop(), queue, True)
         logger.debug(f"put req: {request.req_id}")
+
+        start_time = time.perf_counter()
         await self.incoming_requests.put(request)
+
+        first_token_time: float | None = None
+        token_count = 0
         while True:
             item = await queue.get()
             if item.is_finished:
                 break
-            yield item.delta
+
+            now = time.perf_counter()
+            token_count += 1
+
+            if first_token_time is None:
+                # 第一个 token：只有 prefill，无 decode 阶段
+                first_token_time = now
+                ttft = first_token_time - start_time
+                metrics = PerfMetrics(
+                    ttft=ttft,
+                    token_count=1,
+                    tps=0.0,
+                    total_elapsed=ttft,
+                )
+            else:
+                # 后续 token：running 平均 TPS = (token_count - 1) / decode_elapsed
+                total_elapsed = now - start_time
+                decode_elapsed = now - first_token_time
+                tps = (token_count - 1) / decode_elapsed if decode_elapsed > 0 else 0.0
+                metrics = PerfMetrics(
+                    ttft=first_token_time - start_time,
+                    token_count=token_count,
+                    tps=tps,
+                    total_elapsed=total_elapsed,
+                )
+
+            yield StreamChunk(delta=item.delta, metrics=metrics)
 
     def close(self):
         self.finished = True
