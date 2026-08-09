@@ -1,6 +1,6 @@
 import json
 from dataclasses import dataclass, field
-from typing import Any, Dict, Literal, Union
+from typing import Any, Dict, Literal
 
 from transformers import Qwen3Config
 
@@ -30,14 +30,16 @@ class ModelConfig:
     num_attention_heads: int = 16
     head_dim: int = 128
     intermediate_size: int = 4096
-    num_experts:int = 0
+    num_experts: int = 0
     num_experts_per_token: int = 0
 
     norm_type: NORM_TYPE = "rms_norm"
-    norm_params: dict = field(default_factory=lambda :{"eps": 1e-5})
+    norm_params: dict = field(default_factory=lambda: {"eps": 1e-5})
 
     pos_embed_type: POS_EMBED_TYPE = "rope"
-    pos_embed_params: dict = field(default_factory=lambda :{"rope_theta": 100000, "rope_type": "neox"})
+    pos_embed_params: dict = field(
+        default_factory=lambda: {"rope_theta": 100000, "rope_type": "neox"}
+    )
 
     self_attn: ComponentConfig = field(
         default_factory=lambda: ComponentConfig("base")

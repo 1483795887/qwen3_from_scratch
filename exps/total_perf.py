@@ -1,12 +1,18 @@
-from torch.profiler import profile, record_function, ProfilerActivity
-from qwen3_from_scratch.factory import ComponentFactory, ModelConfig
-from qwen3_from_scratch.models.qwen3 import Qwen3
-from qwen3_from_scratch.inference.context import ModelContext, set_forward_context
-import torch
 import os
-from qwen3_from_scratch.utils.env import load_env_file
+
+import torch
+from torch.profiler import ProfilerActivity, profile, record_function
+
 from qwen3_from_scratch.factory.config import load_from_file
+from qwen3_from_scratch.inference.context import (
+    ModelContext,
+    set_forward_context,
+)
+from qwen3_from_scratch.models.qwen3 import Qwen3
+from qwen3_from_scratch.utils.env import load_env_file
+
 load_env_file()
+
 
 def main():
     model_path = os.environ.get("MODEL_PATH")
@@ -30,6 +36,7 @@ def main():
             print(f"显存占用 {mem}")
 
     print(prof.key_averages().table(sort_by="cuda_time_total", row_limit=20))
+
 
 if __name__ == "__main__":
     # 打印 TOP 20 最慢的算子

@@ -10,8 +10,8 @@ class KVCache(ABC):
         k: torch.Tensor,
         v: torch.Tensor,
         layer_idx: int,
-        cache_pos: int = 0
-    )->tuple[torch.Tensor, torch.Tensor]:
+        cache_pos: int = 0,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
         pass
 
     @abstractmethod

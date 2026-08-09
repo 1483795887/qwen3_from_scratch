@@ -4,7 +4,6 @@ import time
 
 import jinja2
 import torch
-from tokenizers import Tokenizer
 
 from qwen3_from_scratch.factory.config import load_from_file
 from qwen3_from_scratch.inference.engine import BatchRunner
@@ -38,12 +37,12 @@ def benchmark(
     """逐 token 计时，记录 prefill 和 decode 时间。"""
     prefill_times = []
     decode_times = []
-    total_decode_time_first_run = None
 
     for run in range(num_runs):
         idx = torch.tensor([prompt_tokens]).to(device)
         token_count = 0
         run_decode_times = []
+        prev = None
 
         for _ in range(max_new_tokens):
             torch.cuda.synchronize() if device == "cuda" else None
@@ -51,10 +50,10 @@ def benchmark(
 
             with torch.no_grad():
                 if token_count == 0:
-                    first = engine.prefill(idx)
-                    nxt = first
+                    nxt = engine.prefill(idx)
                 else:
                     nxt = engine.step(prev)
+                prev = nxt
 
             if nxt[0] == config.eos_token_id:
                 break
@@ -62,7 +61,6 @@ def benchmark(
             torch.cuda.synchronize() if device == "cuda" else None
             elapsed = time.perf_counter() - start
             token_count += 1
-            prev = nxt
 
             if token_count == 1:
                 prefill_times.append(elapsed)
@@ -87,9 +85,11 @@ def benchmark(
         avg_prefill + sum(all_decode) / num_runs if all_decode else avg_prefill
     )
 
-    print(f"\n  === Summary ===")
+    print("\n  === Summary ===")
     print(f"  Time to First Token (TTFT): {avg_prefill:.4f}s")
-    print(f"  Avg Decode: {avg_decode:.4f}s/token ({toks_per_sec:.2f} tokens/s)")
+    print(
+        f"  Avg Decode: {avg_decode:.4f}s/token ({toks_per_sec:.2f} tokens/s)"
+    )
     print(f"  Total Time: {total_time:.4f}s")
     print(
         f"  Generated Tokens (per run): {sum(len(rt) for rt in decode_times) // num_runs}"
@@ -111,9 +111,7 @@ def main():
 
     config = load_from_file(model_path + "/config.json")
     config.decoder_layer.name = "my_op"
-    engine = BatchRunner.from_path(
-        model_path, device=device, max_len=512
-    )
+    engine = BatchRunner.from_path(model_path, device=device, max_len=512)
     engine.model.config = config
 
     print("Warming up...")
@@ -148,7 +146,7 @@ def main():
         print(f"\n{'=' * 50}")
         print(f"Prompt: {name} ({len(inputs.ids)} tokens)")
         print(f"{'=' * 50}")
-        results = benchmark(
+        benchmark(
             engine,
             config,
             inputs.ids,

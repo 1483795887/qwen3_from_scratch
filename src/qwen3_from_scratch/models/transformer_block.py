@@ -1,25 +1,39 @@
 from torch import nn
 
 from qwen3_from_scratch.factory import ComponentFactory, ModelConfig
-from qwen3_from_scratch.inference.context import get_forward_context
 from qwen3_from_scratch.models.parameter_loader import ParameterLoader
 
 
 @ComponentFactory.register("decoder_layer", "base")
 class PythonTransformerBlock(nn.Module):
-    def __init__(self, config: ModelConfig, name: str, layer_idx: int, **kwargs):
+    def __init__(
+        self, config: ModelConfig, name: str, layer_idx: int, **kwargs
+    ):
         super().__init__()
         self.name = name
         self.layer_idx = layer_idx
         self.config = config
-        self.self_attn = ComponentFactory.create("self_attn", config, name=f'{self.name}.self_attn',
-                                                 layer_idx=layer_idx)
-        self.input_layernorm = ComponentFactory.create("norm", config, name=f'{self.name}.input_layernorm',
-                                                       dim=config.hidden_size)
-        self.post_attention_layernorm = ComponentFactory.create("norm", config,
-                                                                name=f'{self.name}.post_attention_layernorm',
-                                                                dim=config.hidden_size)
-        self.mlp = ComponentFactory.create("mlp", config, name=f'{self.name}.mlp')
+        self.self_attn = ComponentFactory.create(
+            "self_attn",
+            config,
+            name=f"{self.name}.self_attn",
+            layer_idx=layer_idx,
+        )
+        self.input_layernorm = ComponentFactory.create(
+            "norm",
+            config,
+            name=f"{self.name}.input_layernorm",
+            dim=config.hidden_size,
+        )
+        self.post_attention_layernorm = ComponentFactory.create(
+            "norm",
+            config,
+            name=f"{self.name}.post_attention_layernorm",
+            dim=config.hidden_size,
+        )
+        self.mlp = ComponentFactory.create(
+            "mlp", config, name=f"{self.name}.mlp"
+        )
 
     def forward(self, x):
         inp_x = x
@@ -40,19 +54,37 @@ class PythonTransformerBlock(nn.Module):
 
 @ComponentFactory.register("decoder_layer", "my_op")
 class FusedTransformerBlock(nn.Module):
-    def __init__(self, config: ModelConfig, name: str, layer_idx: int, **kwargs):
+    def __init__(
+        self, config: ModelConfig, name: str, layer_idx: int, **kwargs
+    ):
         super().__init__()
         self.name = name
         self.layer_idx = layer_idx
         self.config = config
-        self.self_attn = ComponentFactory.create("self_attn", config, "my_op", name=f'{self.name}.self_attn',
-                                                 layer_idx=layer_idx)
-        self.input_layernorm = ComponentFactory.create("norm", config, "my_op", name=f'{self.name}.input_layernorm',
-                                                       dim=config.hidden_size)
-        self.post_attention_layernorm = ComponentFactory.create("norm", config, "my_op",
-                                                                name=f'{self.name}.post_attention_layernorm',
-                                                                dim=config.hidden_size)
-        self.mlp = ComponentFactory.create("mlp", config, "my_op", name=f'{self.name}.mlp')
+        self.self_attn = ComponentFactory.create(
+            "self_attn",
+            config,
+            "my_op",
+            name=f"{self.name}.self_attn",
+            layer_idx=layer_idx,
+        )
+        self.input_layernorm = ComponentFactory.create(
+            "norm",
+            config,
+            "my_op",
+            name=f"{self.name}.input_layernorm",
+            dim=config.hidden_size,
+        )
+        self.post_attention_layernorm = ComponentFactory.create(
+            "norm",
+            config,
+            "my_op",
+            name=f"{self.name}.post_attention_layernorm",
+            dim=config.hidden_size,
+        )
+        self.mlp = ComponentFactory.create(
+            "mlp", config, "my_op", name=f"{self.name}.mlp"
+        )
 
     def forward(self, x):
         inp_x = x

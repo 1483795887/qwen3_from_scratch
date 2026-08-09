@@ -3,6 +3,7 @@ import os
 from qwen3_from_scratch.factory.config import ComponentConfig
 from qwen3_from_scratch.inference.engine import BatchRunner
 from qwen3_from_scratch.utils.env import load_env_file
+
 load_env_file()
 
 # 从魔搭 (modelscope.cn/models/gongjy/minimind-3-moe)
@@ -19,13 +20,17 @@ if MODEL_PATH is None:
 
 
 def main():
-    engine = BatchRunner.from_path(MODEL_PATH, device="cpu", max_len=2048, components={
-        "mlp": ComponentConfig("moe")
-    })
+    engine = BatchRunner.from_path(
+        MODEL_PATH,
+        device="cpu",
+        max_len=2048,
+        components={"mlp": ComponentConfig("moe")},
+    )
 
     for token in engine.generate_stream(
-            [{"role": "user", "content": "你有什么特长？"}],
-            max_new_tokens=2048,  temperature=0.85
+        [{"role": "user", "content": "你有什么特长？"}],
+        max_new_tokens=2048,
+        temperature=0.85,
     ):
         print(token, end="", flush=True)
     print()

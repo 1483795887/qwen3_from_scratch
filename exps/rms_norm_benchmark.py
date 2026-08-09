@@ -1,12 +1,12 @@
 import time
-import torch
-import matplotlib.pyplot as plt
-import pandas as pd
 from dataclasses import dataclass
-from typing import List, Dict
+from typing import List
+
+import matplotlib.pyplot as plt
+import torch
 
 from qwen3_from_scratch.factory import ComponentFactory
-from qwen3_from_scratch.factory.config import load_from_file, ModelConfig
+from qwen3_from_scratch.factory.config import ModelConfig, load_from_file
 from qwen3_from_scratch.utils.env import load_env_file
 
 
@@ -103,14 +103,20 @@ def benchmark_rms_norm(
 
     speedup = torch_time / my_time if my_time > 0 else 0
 
-    return BenchmarkResult(dim=dim, dtype=dtype, torch_time_ms=torch_time, my_time_ms=my_time, speedup=speedup)
+    return BenchmarkResult(
+        dim=dim,
+        dtype=dtype,
+        torch_time_ms=torch_time,
+        my_time_ms=my_time,
+        speedup=speedup,
+    )
 
 
 def run_benchmarks(
     dims: List[int],
     dtypes: List[str],
     base_config: ModelConfig,
-    device: str = "cuda"
+    device: str = "cuda",
 ) -> List[BenchmarkResult]:
     if not torch.cuda.is_available():
         print("CUDA is not available, cannot run benchmark")
@@ -127,25 +133,18 @@ def run_benchmarks(
             print(f"Testing dim={dim}...", end=" ")
             result = benchmark_rms_norm(base_config, dim, dtype)
             results.append(result)
-            print(f"Torch: {result.torch_time_ms:.4f}ms, My: {result.my_time_ms:.4f}ms, Speedup: {result.speedup:.2f}x")
+            print(
+                f"Torch: {result.torch_time_ms:.4f}ms, My: {result.my_time_ms:.4f}ms, Speedup: {result.speedup:.2f}x"
+            )
 
     return results
 
 
-def generate_report(results: List[BenchmarkResult], output_path: str, pics_path: str):
+def generate_report(
+    results: List[BenchmarkResult], output_path: str, pics_path: str
+):
     dtypes = sorted(set(r.dtype for r in results))
     dims = sorted(set(r.dim for r in results))
-
-    df_data = []
-    for r in results:
-        df_data.append({
-            "Dim": r.dim,
-            "Dtype": r.dtype,
-            "TorchRmsNorm (ms)": r.torch_time_ms,
-            "MyRmsNorm (ms)": r.my_time_ms,
-            "Speedup": r.speedup,
-        })
-    df = pd.DataFrame(df_data)
 
     fig, axes = plt.subplots(2, 2, figsize=(16, 12))
 
@@ -161,21 +160,28 @@ def generate_report(results: List[BenchmarkResult], output_path: str, pics_path:
         col = idx % 2
         ax = axes[row, col]
 
-        ax.plot(x, torch_times, marker='o', label='TorchRmsNorm', linewidth=2)
-        ax.plot(x, my_times, marker='s', label='MyRmsNorm', linewidth=2)
-        ax.set_xlabel('Dim')
-        ax.set_ylabel('Time (ms)')
-        ax.set_title(f'RMSNorm Performance - {dtype}')
+        ax.plot(x, torch_times, marker="o", label="TorchRmsNorm", linewidth=2)
+        ax.plot(x, my_times, marker="s", label="MyRmsNorm", linewidth=2)
+        ax.set_xlabel("Dim")
+        ax.set_ylabel("Time (ms)")
+        ax.set_title(f"RMSNorm Performance - {dtype}")
         ax.legend()
         ax.grid(True, alpha=0.3)
 
     speedup_ax = axes[1, 1]
-    speedup_ax.axis('off')
+    speedup_ax.axis("off")
     speedup_table_data = []
     for dim in dims:
         row = [dim]
         for dtype in dtypes:
-            r = next((res for res in results if res.dim == dim and res.dtype == dtype), None)
+            r = next(
+                (
+                    res
+                    for res in results
+                    if res.dim == dim and res.dtype == dtype
+                ),
+                None,
+            )
             if r:
                 row.append(f"{r.speedup:.2f}x")
             else:
@@ -185,13 +191,13 @@ def generate_report(results: List[BenchmarkResult], output_path: str, pics_path:
     table = speedup_ax.table(
         cellText=speedup_table_data,
         colLabels=["Dim"] + dtypes,
-        loc='center',
-        cellLoc='center'
+        loc="center",
+        cellLoc="center",
     )
     table.auto_set_font_size(False)
     table.set_fontsize(10)
     table.scale(1.2, 1.5)
-    speedup_ax.set_title('Speedup Summary (My/Torch)', y=0.85)
+    speedup_ax.set_title("Speedup Summary (My/Torch)", y=0.85)
 
     plt.tight_layout()
     chart_path = f"{pics_path}/rms_norm_benchmark.png"
@@ -210,10 +216,10 @@ def generate_report(results: List[BenchmarkResult], output_path: str, pics_path:
         axes2[idx].bar(range(len(x)), speedups)
         axes2[idx].set_xticks(range(len(x)))
         axes2[idx].set_xticklabels(x, rotation=45)
-        axes2[idx].set_xlabel('Dim')
-        axes2[idx].set_ylabel('Speedup (x)')
-        axes2[idx].set_title(f'Speedup by Dim - {dtype}')
-        axes2[idx].axhline(y=1, color='r', linestyle='--', alpha=0.5)
+        axes2[idx].set_xlabel("Dim")
+        axes2[idx].set_ylabel("Speedup (x)")
+        axes2[idx].set_title(f"Speedup by Dim - {dtype}")
+        axes2[idx].axhline(y=1, color="r", linestyle="--", alpha=0.5)
         axes2[idx].grid(True, alpha=0.3)
 
     chart_path2 = f"{pics_path}/rms_norm_benchmark_speedup.png"
@@ -256,7 +262,9 @@ def generate_report(results: List[BenchmarkResult], output_path: str, pics_path:
 
     for dtype in dtypes:
         dtype_results = [r for r in results if r.dtype == dtype]
-        avg_speedup = sum(r.speedup for r in dtype_results) / len(dtype_results)
+        avg_speedup = sum(r.speedup for r in dtype_results) / len(
+            dtype_results
+        )
         best = max(dtype_results, key=lambda r: r.speedup)
         worst = min(dtype_results, key=lambda r: r.speedup)
 
@@ -273,11 +281,15 @@ def generate_report(results: List[BenchmarkResult], output_path: str, pics_path:
 
     for dtype in dtypes:
         dtype_results = [r for r in results if r.dtype == dtype]
-        avg_speedup = sum(r.speedup for r in dtype_results) / len(dtype_results)
+        avg_speedup = sum(r.speedup for r in dtype_results) / len(
+            dtype_results
+        )
         if avg_speedup > 1:
             report += f"- **{dtype}**: MyRmsNorm 平均快 {avg_speedup:.2f}x\n"
         else:
-            report += f"- **{dtype}**: TorchRmsNorm 平均快 {1/avg_speedup:.2f}x\n"
+            report += (
+                f"- **{dtype}**: TorchRmsNorm 平均快 {1 / avg_speedup:.2f}x\n"
+            )
 
     report += f"""
 ## 性能图表
@@ -287,7 +299,7 @@ def generate_report(results: List[BenchmarkResult], output_path: str, pics_path:
 ![Speedup by Dim]({chart_path2})
 """
 
-    with open(output_path, 'w', encoding='utf-8') as f:
+    with open(output_path, "w", encoding="utf-8") as f:
         f.write(report)
 
     print(f"Report saved to: {output_path}")
@@ -322,7 +334,7 @@ def main():
     output_path = "exps/reports/rms_norm_benchmark_report.md"
     pics_path = "pics"
 
-    report = generate_report(results, output_path, pics_path)
+    generate_report(results, output_path, pics_path)
     print("\n" + "=" * 60)
     print("Benchmark completed!")
 

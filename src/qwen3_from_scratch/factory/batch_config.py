@@ -145,6 +145,7 @@ class SchedulerDefaults:
     block_size: int = 16
     gpu_utilization: float = 0.5
 
+
 # ── 顶层配置 ──────────────────────────────────
 
 
@@ -175,9 +176,7 @@ class BatchConfig:
                     generation=merged,
                 )
         available = self.list_model_names()
-        raise ValueError(
-            f"模型 '{name}' 未找到。可用: {available}"
-        )
+        raise ValueError(f"模型 '{name}' 未找到。可用: {available}")
 
     def list_model_names(self) -> List[str]:
         """返回所有模型的 name 列表。"""
@@ -265,7 +264,7 @@ def load_batch_config(config_path: str) -> BatchConfig:
         max_num_seqs=scheduler_raw.get("max_num_seqs", 32),
         max_num_tokens=scheduler_raw.get("max_num_tokens", 3000),
         block_size=scheduler_raw.get("block_size", 16),
-        gpu_utilization=scheduler_raw.get("gpu_utilization", 0.5)
+        gpu_utilization=scheduler_raw.get("gpu_utilization", 0.5),
     )
 
     # 解析 KVCache dtype
@@ -292,9 +291,7 @@ def load_batch_config(config_path: str) -> BatchConfig:
         # 组件配置
         components_raw = m.get("components", {}) or {}
         if not isinstance(components_raw, dict):
-            raise ValueError(
-                f"模型 {m['name']}: components 必须是字典"
-            )
+            raise ValueError(f"模型 {m['name']}: components 必须是字典")
         components = {
             k: _parse_component(v) for k, v in components_raw.items()
         }
@@ -358,16 +355,12 @@ def _validate(config: BatchConfig) -> None:
     for m in config.models:
         # path 存在
         if not os.path.isdir(m.path):
-            raise ValueError(
-                f"模型 {m.name}: path 不存在或不是目录: {m.path}"
-            )
+            raise ValueError(f"模型 {m.name}: path 不存在或不是目录: {m.path}")
 
         # config.json 存在
         config_json = os.path.join(m.path, "config.json")
         if not os.path.isfile(config_json):
-            raise ValueError(
-                f"模型 {m.name}: 目录下无 config.json: {m.path}"
-            )
+            raise ValueError(f"模型 {m.name}: 目录下无 config.json: {m.path}")
 
         # components 字段名 + 实现名有效
         for comp_name, comp_conf in m.components.items():

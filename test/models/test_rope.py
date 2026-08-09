@@ -8,7 +8,10 @@ from transformers.models.qwen3.modeling_qwen3 import (
 )
 
 from qwen3_from_scratch.factory import ComponentFactory
-from qwen3_from_scratch.inference.context import ModelContext, set_forward_context
+from qwen3_from_scratch.inference.context import (
+    ModelContext,
+    set_forward_context,
+)
 
 
 @pytest.mark.parametrize("component_type", ["base", "my_op"])

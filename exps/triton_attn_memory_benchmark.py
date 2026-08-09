@@ -1,7 +1,8 @@
-import triton
-import torch
-import matplotlib.pyplot as plt
 from typing import Literal
+
+import matplotlib.pyplot as plt
+import torch
+import triton
 
 from qwen3_from_scratch.factory import ComponentFactory
 from qwen3_from_scratch.factory.config import ModelConfig
@@ -11,7 +12,15 @@ DEVICE = triton.runtime.driver.active.get_active_torch_device()
 PROVIDERS = Literal["base", "my_op", "my_op_flash"]
 
 
-def measure_memory(provider: PROVIDERS, seq_len: int, dtype: torch.dtype, D: int, head_dim: int, num_q_heads: int, num_kv_heads: int):
+def measure_memory(
+    provider: PROVIDERS,
+    seq_len: int,
+    dtype: torch.dtype,
+    D: int,
+    head_dim: int,
+    num_q_heads: int,
+    num_kv_heads: int,
+):
     """测量指定配置下的最大显存占用"""
     config = ModelConfig(
         hidden_size=D,
@@ -24,9 +33,21 @@ def measure_memory(provider: PROVIDERS, seq_len: int, dtype: torch.dtype, D: int
 
     # 创建输入张量（不计算梯度）
     with torch.no_grad():
-        q = torch.randn((batch_size, seq_len, num_q_heads, head_dim), dtype=dtype, device=DEVICE).transpose(1,2)
-        k = torch.randn((batch_size, seq_len, num_kv_heads, head_dim), dtype=dtype, device=DEVICE).transpose(1,2)
-        v = torch.randn((batch_size, seq_len, num_kv_heads, head_dim), dtype=dtype, device=DEVICE).transpose(1,2)
+        q = torch.randn(
+            (batch_size, seq_len, num_q_heads, head_dim),
+            dtype=dtype,
+            device=DEVICE,
+        ).transpose(1, 2)
+        k = torch.randn(
+            (batch_size, seq_len, num_kv_heads, head_dim),
+            dtype=dtype,
+            device=DEVICE,
+        ).transpose(1, 2)
+        v = torch.randn(
+            (batch_size, seq_len, num_kv_heads, head_dim),
+            dtype=dtype,
+            device=DEVICE,
+        ).transpose(1, 2)
 
     # 创建算子
     attn_op = ComponentFactory.create(
@@ -53,7 +74,7 @@ def measure_memory(provider: PROVIDERS, seq_len: int, dtype: torch.dtype, D: int
     peak_memory = torch.cuda.max_memory_allocated(DEVICE)
 
     # 计算实际占用（峰值减去初始）
-    memory_used = (peak_memory - initial_memory) / (1024 ** 2)  # 转换为 MB
+    memory_used = (peak_memory - initial_memory) / (1024**2)  # 转换为 MB
 
     # 清理
     del q, k, v, attn_op
@@ -77,24 +98,38 @@ def run_benchmark():
     # 存储结果
     results = {provider: [] for provider in ["base", "my_op", "my_op_flash"]}
 
-    print(f"Running memory benchmark (D={D}, head_dim={head_dim}, num_q_heads={num_q_heads}, num_kv_heads={num_kv_heads}, dtype={dtype})")
+    print(
+        f"Running memory benchmark (D={D}, head_dim={head_dim}, num_q_heads={num_q_heads}, num_kv_heads={num_kv_heads}, dtype={dtype})"
+    )
     print("-" * 80)
-    print(f"{'Seq Len':>10} | {'base (MB)':>12} | {'my_op (MB)':>12} | {'my_op_flash (MB)':>18}")
+    print(
+        f"{'Seq Len':>10} | {'base (MB)':>12} | {'my_op (MB)':>12} | {'my_op_flash (MB)':>18}"
+    )
     print("-" * 80)
 
     for seq_len in seq_lengths:
         row_data = [seq_len]
         for provider in ["base", "my_op", "my_op_flash"]:
             try:
-                memory = measure_memory(provider, seq_len, dtype, D, head_dim, num_q_heads, num_kv_heads)
+                memory = measure_memory(
+                    provider,
+                    seq_len,
+                    dtype,
+                    D,
+                    head_dim,
+                    num_q_heads,
+                    num_kv_heads,
+                )
                 results[provider].append(memory)
                 row_data.append(f"{memory:.2f}")
             except Exception as e:
-                results[provider].append(float('nan'))
+                results[provider].append(float("nan"))
                 row_data.append("N/A")
                 print(f"Error with {provider} at seq_len={seq_len}: {e}")
 
-        print(f"{row_data[0]:>10} | {row_data[1]:>12} | {row_data[2]:>12} | {row_data[3]:>18}")
+        print(
+            f"{row_data[0]:>10} | {row_data[1]:>12} | {row_data[2]:>12} | {row_data[3]:>18}"
+        )
 
     print("-" * 80)
 
@@ -102,11 +137,20 @@ def run_benchmark():
     plt.figure(figsize=(12, 6))
 
     for provider in ["base", "my_op", "my_op_flash"]:
-        plt.plot(seq_lengths, results[provider], marker='o', label=provider, linewidth=2)
+        plt.plot(
+            seq_lengths,
+            results[provider],
+            marker="o",
+            label=provider,
+            linewidth=2,
+        )
 
     plt.xlabel("Sequence Length", fontsize=12)
     plt.ylabel("Memory Usage (MB)", fontsize=12)
-    plt.title(f"Attention Memory Usage vs Sequence Length\n(D={D}, head_dim={head_dim}, {num_q_heads}Q/{num_kv_heads}KV heads, {dtype})", fontsize=14)
+    plt.title(
+        f"Attention Memory Usage vs Sequence Length\n(D={D}, head_dim={head_dim}, {num_q_heads}Q/{num_kv_heads}KV heads, {dtype})",
+        fontsize=14,
+    )
     plt.legend(fontsize=10)
     plt.grid(True, alpha=0.3)
     plt.tight_layout()

@@ -1,18 +1,19 @@
 import os
 from typing import Collection, Dict, Iterator, List, Optional, Union
 
-import jinja2
 import torch
 import torch.nn as nn
 from transformers import AutoTokenizer, PreTrainedTokenizer
 
 from qwen3_from_scratch.factory.batch_config import (
-    BatchConfig,
     ResolvedModelEntry,
     load_batch_config,
 )
 from qwen3_from_scratch.factory.config import ComponentConfig, GenerationConfig
-from qwen3_from_scratch.inference.context import ModelContext, set_forward_context
+from qwen3_from_scratch.inference.context import (
+    ModelContext,
+    set_forward_context,
+)
 from qwen3_from_scratch.inference.kv_cache.pre_allocated_kv_cache import (
     PreAllocatedKVCache,
 )
@@ -94,9 +95,7 @@ class BatchRunner:
         )
 
     @classmethod
-    def from_model_entry(
-        cls, entry: ResolvedModelEntry
-    ) -> "BatchRunner":
+    def from_model_entry(cls, entry: ResolvedModelEntry) -> "BatchRunner":
         """从已合并的模型条目构建引擎。
 
         Sampler 从 entry.generation 构建，不走 generation_config.json。
@@ -116,9 +115,7 @@ class BatchRunner:
         return runner
 
     @classmethod
-    def from_config(
-        cls, config_path: str, model_name: str
-    ) -> "BatchRunner":
+    def from_config(cls, config_path: str, model_name: str) -> "BatchRunner":
         """从 YAML 配置文件加载并构建指定模型的引擎。
 
         等价于 load_batch_config → get_model → from_model_entry。
@@ -150,14 +147,19 @@ class BatchRunner:
         self._seq_len = prompt_ids.shape[1]
         return next_ids[:, 0].tolist()  # length B
 
-    def step(self, token_ids: List[int], sampler: Optional[Sampler] = None) -> List[int]:
+    def step(
+        self, token_ids: List[int], sampler: Optional[Sampler] = None
+    ) -> List[int]:
         """单步 decode：输入 B 个词元，输出 B 个下一个词元。
 
         必须先调用 prefill 建立上下文。
         """
         self._context.cache_position = self._seq_len
         self._context.position_ids = torch.arange(
-            self._seq_len, self._seq_len + 1, dtype=torch.long, device=self.device
+            self._seq_len,
+            self._seq_len + 1,
+            dtype=torch.long,
+            device=self.device,
         ).unsqueeze(0)
         token_tensor = torch.tensor([token_ids], device=self.device)  # [B, 1]
         with torch.inference_mode():
@@ -218,7 +220,12 @@ class BatchRunner:
         """同步：返回完整文本。"""
         return "".join(
             self.generate_stream(
-                prompt, max_new_tokens, eos_ids, open_thinking, temperature, top_k
+                prompt,
+                max_new_tokens,
+                eos_ids,
+                open_thinking,
+                temperature,
+                top_k,
             )
         )
 
@@ -234,7 +241,11 @@ class BatchRunner:
         )
         self._seq_len = 0
 
-    def _encode(self, prompt: Union[str, List[Dict[str, str]]], open_thinking: bool = False) -> torch.Tensor:
+    def _encode(
+        self,
+        prompt: Union[str, List[Dict[str, str]]],
+        open_thinking: bool = False,
+    ) -> torch.Tensor:
         """prompt → token id tensor [1, S]。
 
         str  → 直接 tokenize
@@ -244,7 +255,10 @@ class BatchRunner:
             text = prompt
         elif isinstance(prompt, list):
             text = self.tokenizer.apply_chat_template(
-                prompt, tokenize=False, add_generation_prompt=True, open_thinking=open_thinking
+                prompt,
+                tokenize=False,
+                add_generation_prompt=True,
+                open_thinking=open_thinking,
             )
         else:
             raise TypeError(
@@ -253,9 +267,7 @@ class BatchRunner:
         return torch.tensor([self.tokenizer.encode(text)])
 
     @staticmethod
-    def _normalize_eos(
-        eos_ids: Union[int, Collection[int], None]
-    ) -> set:
+    def _normalize_eos(eos_ids: Union[int, Collection[int], None]) -> set:
         if eos_ids is None:
             return set()
         if isinstance(eos_ids, int):

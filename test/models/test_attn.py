@@ -11,7 +11,9 @@ from qwen3_from_scratch.models.attn import (
 )
 
 
-@pytest.mark.parametrize("component_type", ["base", "py_flash_attn", "my_op", "my_op_flash"])
+@pytest.mark.parametrize(
+    "component_type", ["base", "py_flash_attn", "my_op", "my_op_flash"]
+)
 def test_gqa_attn_shape_correct(model_config, component_type, device):
     n_batch = 2
     n_seq = 256
@@ -19,9 +21,15 @@ def test_gqa_attn_shape_correct(model_config, component_type, device):
     n_head_kv = model_config.num_key_value_heads
     n_head_dim = model_config.head_dim
 
-    q = torch.rand(n_batch,  n_seq,n_head_q, n_head_dim, device=device).transpose(1,2)
-    k = torch.rand(n_batch,  n_seq,n_head_kv, n_head_dim, device=device).transpose(1,2)
-    v = torch.rand(n_batch,  n_seq,n_head_kv, n_head_dim, device=device).transpose(1,2)
+    q = torch.rand(
+        n_batch, n_seq, n_head_q, n_head_dim, device=device
+    ).transpose(1, 2)
+    k = torch.rand(
+        n_batch, n_seq, n_head_kv, n_head_dim, device=device
+    ).transpose(1, 2)
+    v = torch.rand(
+        n_batch, n_seq, n_head_kv, n_head_dim, device=device
+    ).transpose(1, 2)
     attn = ComponentFactory.create(
         "attn", model_config, component_impl=component_type
     ).to(device)
@@ -37,7 +45,9 @@ class FakeModule(torch.nn.Module):
         self.num_key_value_groups = n_kv_groups
 
 
-@pytest.mark.parametrize("component_type", ["base", "py_flash_attn", "my_op", "my_op_flash"])
+@pytest.mark.parametrize(
+    "component_type", ["base", "py_flash_attn", "my_op", "my_op_flash"]
+)
 def test_gqa_against_transformers(
     model_config, qwen3_config, component_type, device
 ):
@@ -57,23 +67,23 @@ def test_gqa_against_transformers(
             n_batch,
             n_seq,
             qwen3_config.num_attention_heads,
-            head_dim ,
+            head_dim,
             device=device,
-        ).transpose(1,2)
+        ).transpose(1, 2)
         k = torch.rand(
             n_batch,
             n_seq,
             qwen3_config.num_key_value_heads,
-            head_dim ,
+            head_dim,
             device=device,
-        ).transpose(1,2)
+        ).transpose(1, 2)
         v = torch.rand(
             n_batch,
             n_seq,
             qwen3_config.num_key_value_heads,
-            head_dim ,
+            head_dim,
             device=device,
-        ).transpose(1,2)
+        ).transpose(1, 2)
         attn_output, _ = transformers_attention_interface(
             fake_module,
             q,
@@ -92,7 +102,9 @@ def test_gqa_against_transformers(
 def test_gqa_against_transformers_with_cache(
     model_config, component_type, qwen3_config, device
 ):
-    new_gqa = ComponentFactory.create("attn", model_config, component_impl=component_type).to(device)
+    new_gqa = ComponentFactory.create(
+        "attn", model_config, component_impl=component_type
+    ).to(device)
     n_batch = 2
     n_seq = 256
     qwen3_config._attn_implementation = "sdpa"
@@ -100,19 +112,33 @@ def test_gqa_against_transformers_with_cache(
         qwen3_config._attn_implementation, eager_attention_forward
     )
     scale = qwen3_config.head_dim**-0.5
-    groups = model_config.num_attention_heads // model_config.num_key_value_heads
+    groups = (
+        model_config.num_attention_heads // model_config.num_key_value_heads
+    )
     fake_module = FakeModule(groups)
     head_dim = model_config.head_dim
     with torch.no_grad():
         q = torch.rand(
-            n_batch, 1, model_config.num_attention_heads, head_dim, device=device
-        ).transpose(1,2)
+            n_batch,
+            1,
+            model_config.num_attention_heads,
+            head_dim,
+            device=device,
+        ).transpose(1, 2)
         k = torch.rand(
-            n_batch, n_seq, model_config.num_key_value_heads, head_dim, device=device
-        ).transpose(1,2)
+            n_batch,
+            n_seq,
+            model_config.num_key_value_heads,
+            head_dim,
+            device=device,
+        ).transpose(1, 2)
         v = torch.rand(
-            n_batch, n_seq, model_config.num_key_value_heads, head_dim, device=device
-        ).transpose(1,2)
+            n_batch,
+            n_seq,
+            model_config.num_key_value_heads,
+            head_dim,
+            device=device,
+        ).transpose(1, 2)
         attn_output, _ = transformers_attention_interface(
             fake_module,
             q,

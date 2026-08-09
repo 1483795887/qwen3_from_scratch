@@ -1,5 +1,6 @@
-from qwen3_from_scratch.inference.sequence import Sequence
 import math
+
+from qwen3_from_scratch.inference.sequence import Sequence
 
 
 class BlockManager:

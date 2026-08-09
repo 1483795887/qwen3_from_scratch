@@ -1,8 +1,7 @@
-import triton
-import torch
+from typing import Literal
 
 import torch
-from typing import Literal
+import triton
 
 from qwen3_from_scratch.factory import ComponentFactory
 from qwen3_from_scratch.factory.config import (
@@ -49,8 +48,11 @@ def benchmark(D: int, provider: PROVIDERS, dtype: torch.dtype):
     ms, min_ms, max_ms = triton.testing.do_bench(
         lambda: norm_op(a), quantiles=quantiles
     )
+
     # 平方，计算量D，求和，计算量D，乘以gamma，计算量系数，计算量系数，计算量 D，共 5D
-    perf = lambda ms: 5 * D * 1e-12 / (ms * 1e-3) * dtype.itemsize
+    def perf(ms):
+        return 5 * D * 1e-12 / (ms * 1e-3) * dtype.itemsize
+
     return perf(ms), perf(max_ms), perf(min_ms)
 
 

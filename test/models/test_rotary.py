@@ -1,12 +1,11 @@
 """RotaryEmbedding + get_rope 预计算模块测试。"""
-import pytest
+
 import torch
 
-from qwen3_from_scratch.models.rotary import RotaryEmbedding, get_rope
+from qwen3_from_scratch.models.rotary import get_rope
 
 
 class TestRotaryEmbedding:
-
     def test_cos_sin_cache_shape(self):
         """cos_sin_cache 应为 (max_position, 1, head_dim)。
 
@@ -24,12 +23,15 @@ class TestRotaryEmbedding:
 
         rotary = get_rope(head_dim, head_dim, max_pos, base)
 
-        inv_freq = 1.0 / (base ** (torch.arange(0, head_dim, 2, dtype=torch.float) / head_dim))
+        inv_freq = 1.0 / (
+            base
+            ** (torch.arange(0, head_dim, 2, dtype=torch.float) / head_dim)
+        )
         t = torch.arange(max_pos, dtype=torch.float)
         freqs = torch.outer(t, inv_freq)
         expected_cos = freqs.cos()
 
-        actual_cos = rotary.cos_sin_cache[:, 0, :head_dim // 2]
+        actual_cos = rotary.cos_sin_cache[:, 0, : head_dim // 2]
         assert torch.allclose(actual_cos, expected_cos, atol=1e-5)
 
     def test_cos_sin_cache_sin_values(self):
@@ -40,17 +42,19 @@ class TestRotaryEmbedding:
 
         rotary = get_rope(head_dim, head_dim, max_pos, base)
 
-        inv_freq = 1.0 / (base ** (torch.arange(0, head_dim, 2, dtype=torch.float) / head_dim))
+        inv_freq = 1.0 / (
+            base
+            ** (torch.arange(0, head_dim, 2, dtype=torch.float) / head_dim)
+        )
         t = torch.arange(max_pos, dtype=torch.float)
         freqs = torch.outer(t, inv_freq)
         expected_sin = freqs.sin()
 
-        actual_sin = rotary.cos_sin_cache[:, 0, head_dim // 2:]
+        actual_sin = rotary.cos_sin_cache[:, 0, head_dim // 2 :]
         assert torch.allclose(actual_sin, expected_sin, atol=1e-5)
 
 
 class TestGetRopeCache:
-
     def test_same_params_return_same_object(self):
         """相同参数调用 get_rope 两次返回同一对象。"""
         r1 = get_rope(128, 128, 512, 100000.0)

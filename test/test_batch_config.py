@@ -3,6 +3,7 @@
 不依赖真实模型文件——用 tmp_path 创建假模型目录 + 假 config.json。
 集成测试（from_config → Runner 推理）单独标记 skip。
 """
+
 import json
 import os
 
@@ -97,9 +98,7 @@ class TestParseComponent:
 
     def test_expanded_with_kwargs(self):
         """dict 含 name + kwargs → 完整解析。"""
-        cc = _parse_component(
-            {"name": "my_op", "kwargs": {"scale": 1.0}}
-        )
+        cc = _parse_component({"name": "my_op", "kwargs": {"scale": 1.0}})
         assert cc.name == "my_op"
         assert cc.kwargs == {"scale": 1.0}
 

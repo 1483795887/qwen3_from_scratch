@@ -32,7 +32,9 @@ class PythonRope(nn.Module):
         与旧 build_cos_sin_embed 的 cat([freqs, freqs]) 一致。
         """
         ctx = get_forward_context()
-        assert ctx.position_ids is not None, "position_ids must be set before forward"
+        assert ctx.position_ids is not None, (
+            "position_ids must be set before forward"
+        )
         rotary = get_rope(
             self.head_dim, self.head_dim, self.max_seq_len, self.base_freq
         )
@@ -76,4 +78,5 @@ class MyRope(PythonRope):
         cos_e = cos[None, None, :, :]
         sin_e = sin[None, None, :, :]
         from qwen3_from_scratch.kernels.triton.rope import neox_rope
+
         return neox_rope(x, cos_e, sin_e)

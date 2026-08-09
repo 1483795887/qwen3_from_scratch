@@ -22,13 +22,20 @@ class FakeModule(torch.nn.Module):
         self.num_key_value_groups = n_kv_groups
 
 
-def _make_paged_attn(model_config, layer_idx=0, component_impl="paged_attn_torch"):
+def _make_paged_attn(
+    model_config, layer_idx=0, component_impl="paged_attn_torch"
+):
     return ComponentFactory.create(
-        "attn", model_config, component_impl=component_impl, layer_idx=layer_idx
+        "attn",
+        model_config,
+        component_impl=component_impl,
+        layer_idx=layer_idx,
     )
 
 
-def _create_kv_cache(model_config, n_batch, n_seq, block_size, layer_idx, device):
+def _create_kv_cache(
+    model_config, n_batch, n_seq, block_size, layer_idx, device
+):
     num_heads_kv = model_config.num_key_value_heads
     head_dim = model_config.head_dim
     num_blocks_per_batch = (n_seq + block_size - 1) // block_size
@@ -37,12 +44,22 @@ def _create_kv_cache(model_config, n_batch, n_seq, block_size, layer_idx, device
     block_size_in_bytes = 1 * num_heads_kv * head_dim * itemsize * block_size
     mem_size = (num_pages_needed + 4) * 2 * block_size_in_bytes
     num_blocks = PagedKVCache.get_block_num(
-        mem_size=mem_size, layers=1, num_heads=num_heads_kv, head_dim=head_dim,
-        dtype=torch.float32, block_size=block_size, device=device,
+        mem_size=mem_size,
+        layers=1,
+        num_heads=num_heads_kv,
+        head_dim=head_dim,
+        dtype=torch.float32,
+        block_size=block_size,
+        device=device,
     )
     kv_cache = PagedKVCache(
-        num_blocks=num_blocks, layers=1, num_heads=num_heads_kv, head_dim=head_dim,
-        dtype=torch.float32, block_size=block_size, device=device,
+        num_blocks=num_blocks,
+        layers=1,
+        num_heads=num_heads_kv,
+        head_dim=head_dim,
+        dtype=torch.float32,
+        block_size=block_size,
+        device=device,
     )
     block_tables = torch.arange(
         n_batch * num_blocks_per_batch, dtype=torch.int32, device=device
@@ -50,7 +67,9 @@ def _create_kv_cache(model_config, n_batch, n_seq, block_size, layer_idx, device
     return kv_cache, block_tables
 
 
-def _build_slot_mapping(block_tables, seq_lens, max_seq_len, block_size, device):
+def _build_slot_mapping(
+    block_tables, seq_lens, max_seq_len, block_size, device
+):
     """根据 block_tables 构造 slot_mapping。
 
     对于 batch b 的第 i 个 token (i < seq_lens[b]):
@@ -62,24 +81,35 @@ def _build_slot_mapping(block_tables, seq_lens, max_seq_len, block_size, device)
     """
     n_batch = block_tables.shape[0]
     token_indices = torch.arange(max_seq_len, device=device)
-    block_indices = token_indices // block_size          # (max_seq_len,)
-    offsets = token_indices % block_size                 # (max_seq_len,)
-    block_ids = block_tables[:, block_indices]           # (n_batch, max_seq_len)
-    slots = block_ids * block_size + offsets.unsqueeze(0)  # (n_batch, max_seq_len)
-    slot_mapping = slots.reshape(-1)                     # (n_batch * max_seq_len,)
+    block_indices = token_indices // block_size  # (max_seq_len,)
+    offsets = token_indices % block_size  # (max_seq_len,)
+    block_ids = block_tables[:, block_indices]  # (n_batch, max_seq_len)
+    slots = block_ids * block_size + offsets.unsqueeze(
+        0
+    )  # (n_batch, max_seq_len)
+    slot_mapping = slots.reshape(-1)  # (n_batch * max_seq_len,)
 
     if isinstance(seq_lens, int):
         seq_lens = [seq_lens] * n_batch
     for b in range(n_batch):
         n = seq_lens[b]
         if n < max_seq_len:
-            slot_mapping[b * max_seq_len + n: (b + 1) * max_seq_len] = -1
+            slot_mapping[b * max_seq_len + n : (b + 1) * max_seq_len] = -1
 
     return slot_mapping.to(torch.int32)
 
 
-def _run_paged_attn(paged_attn, q, k, v, kv_cache, block_tables, block_size,
-                    slot_mapping, cache_position):
+def _run_paged_attn(
+    paged_attn,
+    q,
+    k,
+    v,
+    kv_cache,
+    block_tables,
+    block_size,
+    slot_mapping,
+    cache_position,
+):
     """在同一个 context 中完成 update + forward。"""
     context = ModelContext(
         use_cache=True,
@@ -92,7 +122,9 @@ def _run_paged_attn(paged_attn, q, k, v, kv_cache, block_tables, block_size,
     old_context = get_forward_context()
     try:
         set_forward_context(context)
-        kv_cache.update(k.transpose(1, 2), v.transpose(1, 2), paged_attn.layer_idx)
+        kv_cache.update(
+            k.transpose(1, 2), v.transpose(1, 2), paged_attn.layer_idx
+        )
         return paged_attn(q, k, v)
     finally:
         set_forward_context(old_context)
@@ -120,7 +152,10 @@ def test_torch_paged_attn(model_config, qwen3_config, device):
 
     # --- 创建 paged_attn_torch 模块 ---
     new_gqa = ComponentFactory.create(
-        "attn", model_config, component_impl="paged_attn_torch", layer_idx=layer_idx
+        "attn",
+        model_config,
+        component_impl="paged_attn_torch",
+        layer_idx=layer_idx,
     ).to(device)
 
     # --- 参考: transformers sdpa ---
@@ -128,31 +163,59 @@ def test_torch_paged_attn(model_config, qwen3_config, device):
     transformers_attention_interface = ALL_ATTENTION_FUNCTIONS.get_interface(
         qwen3_config._attn_implementation, eager_attention_forward
     )
-    scale = qwen3_config.head_dim ** -0.5
+    scale = qwen3_config.head_dim**-0.5
     fake_module = FakeModule(groups)
 
     with torch.no_grad():
         # q: decode (1 token), k/v: 256 tokens — BHSD 格式
-        q = torch.rand(n_batch, 1, num_heads_q, head_dim, device=device).transpose(1, 2)
-        k = torch.rand(n_batch, n_seq, num_heads_kv, head_dim, device=device).transpose(1, 2)
-        v = torch.rand(n_batch, n_seq, num_heads_kv, head_dim, device=device).transpose(1, 2)
+        q = torch.rand(
+            n_batch, 1, num_heads_q, head_dim, device=device
+        ).transpose(1, 2)
+        k = torch.rand(
+            n_batch, n_seq, num_heads_kv, head_dim, device=device
+        ).transpose(1, 2)
+        v = torch.rand(
+            n_batch, n_seq, num_heads_kv, head_dim, device=device
+        ).transpose(1, 2)
 
         # --- 参考输出: sdpa (无 mask) ---
         attn_output, _ = transformers_attention_interface(
-            fake_module, q, k, v, None, dropout=0.0, scaling=scale,
+            fake_module,
+            q,
+            k,
+            v,
+            None,
+            dropout=0.0,
+            scaling=scale,
         )
 
         # --- PagedKVCache 设置 ---
         kv_cache, block_tables = _create_kv_cache(
-            model_config, n_batch, n_seq, block_size, layer_idx, device,
+            model_config,
+            n_batch,
+            n_seq,
+            block_size,
+            layer_idx,
+            device,
         )
         slot_mapping = _build_slot_mapping(
-            block_tables, n_seq, n_seq, block_size, device,
+            block_tables,
+            n_seq,
+            n_seq,
+            block_size,
+            device,
         )
 
         new_o = _run_paged_attn(
-            new_gqa, q, k, v, kv_cache, block_tables, block_size,
-            slot_mapping, cache_position=n_seq - 1,
+            new_gqa,
+            q,
+            k,
+            v,
+            kv_cache,
+            block_tables,
+            block_size,
+            slot_mapping,
+            cache_position=n_seq - 1,
         ).transpose(1, 2)
 
         # --- 对比 ---
@@ -181,29 +244,62 @@ def test_torch_paged_attn_prefill(model_config, device):
     )
 
     with torch.no_grad():
-        q = torch.rand(n_batch, n_seq, num_heads_q, head_dim, device=device).transpose(1, 2)
-        k = torch.rand(n_batch, n_seq, num_heads_kv, head_dim, device=device).transpose(1, 2)
-        v = torch.rand(n_batch, n_seq, num_heads_kv, head_dim, device=device).transpose(1, 2)
+        q = torch.rand(
+            n_batch, n_seq, num_heads_q, head_dim, device=device
+        ).transpose(1, 2)
+        k = torch.rand(
+            n_batch, n_seq, num_heads_kv, head_dim, device=device
+        ).transpose(1, 2)
+        v = torch.rand(
+            n_batch, n_seq, num_heads_kv, head_dim, device=device
+        ).transpose(1, 2)
 
-        scale = model_config.head_dim ** -0.5
+        scale = model_config.head_dim**-0.5
         ref = F.scaled_dot_product_attention(
-            q, k, v, is_causal=True, scale=scale, enable_gqa=True,
+            q,
+            k,
+            v,
+            is_causal=True,
+            scale=scale,
+            enable_gqa=True,
         )
 
         slot_mapping = _build_slot_mapping(
-            block_tables, n_seq, n_seq, block_size, device,
+            block_tables,
+            n_seq,
+            n_seq,
+            block_size,
+            device,
         )
         new_o = _run_paged_attn(
-            paged_attn, q, k, v, kv_cache, block_tables, block_size,
-            slot_mapping, cache_position=n_seq - 1,
+            paged_attn,
+            q,
+            k,
+            v,
+            kv_cache,
+            block_tables,
+            block_size,
+            slot_mapping,
+            cache_position=n_seq - 1,
         )
 
         assert ref.shape == new_o.shape
         assert torch.allclose(ref, new_o, atol=1e-5)
 
 
-def _per_seq_sdpa_ref(q_shd, k_shd, v_shd, cum_seq_lens_q, cum_seq_lens_kv,
-                      num_heads_q, num_heads_kv, head_dim, device, scale, is_causal=True):
+def _per_seq_sdpa_ref(
+    q_shd,
+    k_shd,
+    v_shd,
+    cum_seq_lens_q,
+    cum_seq_lens_kv,
+    num_heads_q,
+    num_heads_kv,
+    head_dim,
+    device,
+    scale,
+    is_causal=True,
+):
     n_seqs = len(cum_seq_lens_q) - 1
     ref_parts = []
     for i in range(n_seqs):
@@ -222,13 +318,21 @@ def _per_seq_sdpa_ref(q_shd, k_shd, v_shd, cum_seq_lens_q, cum_seq_lens_kv,
 
         if is_causal and q_i.shape[0] > 1 and q_i.shape[0] == k_i.shape[0]:
             ref_i = F.scaled_dot_product_attention(
-                q_bhsd, k_bhsd, v_bhsd,
-                is_causal=True, scale=scale, enable_gqa=True,
+                q_bhsd,
+                k_bhsd,
+                v_bhsd,
+                is_causal=True,
+                scale=scale,
+                enable_gqa=True,
             )
         elif q_e - q_s == 1:
             ref_i = F.scaled_dot_product_attention(
-                q_bhsd, k_bhsd, v_bhsd,
-                is_causal=False, scale=scale, enable_gqa=True,
+                q_bhsd,
+                k_bhsd,
+                v_bhsd,
+                is_causal=False,
+                scale=scale,
+                enable_gqa=True,
             )
         else:
             # 分段 prefill: 新 query token 占据 kv 区间的末尾 q_len 个绝对位置
@@ -236,11 +340,17 @@ def _per_seq_sdpa_ref(q_shd, k_shd, v_shd, cum_seq_lens_q, cum_seq_lens_kv,
             q_pos = torch.arange(kv_e - (q_e - q_s), kv_e, device=device)
             kv_pos = torch.arange(kv_s, kv_e, device=device)
             causal_mask = q_pos[:, None] < kv_pos[None, :]
-            attn_mask = torch.zeros(q_e - q_s, kv_e - kv_s, device=device, dtype=q_shd.dtype)
-            attn_mask = attn_mask.masked_fill(causal_mask, float('-inf'))
+            attn_mask = torch.zeros(
+                q_e - q_s, kv_e - kv_s, device=device, dtype=q_shd.dtype
+            )
+            attn_mask = attn_mask.masked_fill(causal_mask, float("-inf"))
             ref_i = F.scaled_dot_product_attention(
-                q_bhsd, k_bhsd, v_bhsd,
-                attn_mask=attn_mask, scale=scale, enable_gqa=True,
+                q_bhsd,
+                k_bhsd,
+                v_bhsd,
+                attn_mask=attn_mask,
+                scale=scale,
+                enable_gqa=True,
             )
 
         ref_parts.append(ref_i.squeeze(0).transpose(0, 1))
@@ -248,15 +358,29 @@ def _per_seq_sdpa_ref(q_shd, k_shd, v_shd, cum_seq_lens_q, cum_seq_lens_kv,
     return torch.cat(ref_parts, dim=0)
 
 
-def _run_var_len_paged_attn(paged_attn, q, k_bshd, v_bshd, kv_cache, block_tables,
-                            block_size, cum_seq_lens_q, cum_seq_lens_kv, seq_lens_kv,
-                            max_kv_per_seq):
+def _run_var_len_paged_attn(
+    paged_attn,
+    q,
+    k_bshd,
+    v_bshd,
+    kv_cache,
+    block_tables,
+    block_size,
+    cum_seq_lens_q,
+    cum_seq_lens_kv,
+    seq_lens_kv,
+    max_kv_per_seq,
+):
     """var_len 场景: 在同一个 context 中完成 update + forward。
 
     k_bshd, v_bshd: (n_seqs, max_kv_per_seq, num_heads, head_dim) — BSHD, 含 padding。
     """
     slot_mapping = _build_slot_mapping(
-        block_tables, seq_lens_kv, max_kv_per_seq, block_size, q.device,
+        block_tables,
+        seq_lens_kv,
+        max_kv_per_seq,
+        block_size,
+        q.device,
     )
     context = ModelContext(
         use_cache=True,
@@ -274,8 +398,11 @@ def _run_var_len_paged_attn(paged_attn, q, k_bshd, v_bshd, kv_cache, block_table
         # forward 不使用 k/v 参数 (从缓存读取), 传 dummy
         k_dummy = torch.zeros_like(k_bshd)
         v_dummy = torch.zeros_like(v_bshd)
-        return paged_attn(q, k_dummy.reshape(-1, *k_dummy.shape[2:]),
-                          v_dummy.reshape(-1, *v_dummy.shape[2:]))
+        return paged_attn(
+            q,
+            k_dummy.reshape(-1, *k_dummy.shape[2:]),
+            v_dummy.reshape(-1, *v_dummy.shape[2:]),
+        )
     finally:
         set_forward_context(old_context)
 
@@ -292,12 +419,14 @@ def test_var_len_paged_attn_prefill(model_config, device):
     num_heads_q = model_config.num_attention_heads
     num_heads_kv = model_config.num_key_value_heads
     head_dim = model_config.head_dim
-    scale = head_dim ** -0.5
+    scale = head_dim**-0.5
 
     n_seqs = 2
     seq_lens = [4, 8]
     cum_seq_lens_q = torch.tensor([0, 4, 12], dtype=torch.int32, device=device)
-    cum_seq_lens_kv = torch.tensor([0, 4, 12], dtype=torch.int32, device=device)
+    cum_seq_lens_kv = torch.tensor(
+        [0, 4, 12], dtype=torch.int32, device=device
+    )
     total_q = cum_seq_lens_q[-1].item()
     total_kv = cum_seq_lens_kv[-1].item()
     max_kv_per_seq = max(seq_lens)
@@ -314,23 +443,45 @@ def test_var_len_paged_attn_prefill(model_config, device):
         kv_shd = torch.rand(total_kv, num_heads_kv, head_dim, device=device)
 
         # build BSHD from SHD so cache data matches reference
-        k_bshd = torch.zeros(n_seqs, max_kv_per_seq, num_heads_kv, head_dim, device=device)
-        v_bshd = torch.zeros(n_seqs, max_kv_per_seq, num_heads_kv, head_dim, device=device)
+        k_bshd = torch.zeros(
+            n_seqs, max_kv_per_seq, num_heads_kv, head_dim, device=device
+        )
+        v_bshd = torch.zeros(
+            n_seqs, max_kv_per_seq, num_heads_kv, head_dim, device=device
+        )
         offset = 0
         for i in range(n_seqs):
             n = seq_lens[i]
-            k_bshd[i, :n] = kv_shd[offset:offset + n]
-            v_bshd[i, :n] = kv_shd[offset:offset + n]
+            k_bshd[i, :n] = kv_shd[offset : offset + n]
+            v_bshd[i, :n] = kv_shd[offset : offset + n]
             offset += n
 
         ref = _per_seq_sdpa_ref(
-            q_shd, kv_shd, kv_shd, cum_seq_lens_q.tolist(), cum_seq_lens_kv.tolist(),
-            num_heads_q, num_heads_kv, head_dim, device, scale, is_causal=True,
+            q_shd,
+            kv_shd,
+            kv_shd,
+            cum_seq_lens_q.tolist(),
+            cum_seq_lens_kv.tolist(),
+            num_heads_q,
+            num_heads_kv,
+            head_dim,
+            device,
+            scale,
+            is_causal=True,
         )
 
         new_o = _run_var_len_paged_attn(
-            paged_attn, q_shd, k_bshd, v_bshd, kv_cache, block_tables,
-            block_size, cum_seq_lens_q, cum_seq_lens_kv, seq_lens, max_kv_per_seq,
+            paged_attn,
+            q_shd,
+            k_bshd,
+            v_bshd,
+            kv_cache,
+            block_tables,
+            block_size,
+            cum_seq_lens_q,
+            cum_seq_lens_kv,
+            seq_lens,
+            max_kv_per_seq,
         )
 
         assert ref.shape == new_o.shape
@@ -349,13 +500,15 @@ def test_var_len_paged_attn_decode(model_config, device):
     num_heads_q = model_config.num_attention_heads
     num_heads_kv = model_config.num_key_value_heads
     head_dim = model_config.head_dim
-    scale = head_dim ** -0.5
+    scale = head_dim**-0.5
 
     n_seqs = 2
     seq_lens_kv = [16, 32]
     max_kv_per_seq = max(seq_lens_kv)
     cum_seq_lens_q = torch.tensor([0, 1, 2], dtype=torch.int32, device=device)
-    cum_seq_lens_kv = torch.tensor([0, 16, 48], dtype=torch.int32, device=device)
+    cum_seq_lens_kv = torch.tensor(
+        [0, 16, 48], dtype=torch.int32, device=device
+    )
     total_q = cum_seq_lens_q[-1].item()
     total_kv = cum_seq_lens_kv[-1].item()
 
@@ -371,22 +524,44 @@ def test_var_len_paged_attn_decode(model_config, device):
 
         # shared KV data: one flat SHD source, copied to BSHD for cache
         kv_shd = torch.rand(total_kv, num_heads_kv, head_dim, device=device)
-        k_bshd = torch.zeros(n_seqs, max_kv_per_seq, num_heads_kv, head_dim, device=device)
-        v_bshd = torch.zeros(n_seqs, max_kv_per_seq, num_heads_kv, head_dim, device=device)
+        k_bshd = torch.zeros(
+            n_seqs, max_kv_per_seq, num_heads_kv, head_dim, device=device
+        )
+        v_bshd = torch.zeros(
+            n_seqs, max_kv_per_seq, num_heads_kv, head_dim, device=device
+        )
         offset = 0
         for i, n in enumerate(seq_lens_kv):
-            k_bshd[i, :n] = kv_shd[offset:offset + n]
-            v_bshd[i, :n] = kv_shd[offset:offset + n]
+            k_bshd[i, :n] = kv_shd[offset : offset + n]
+            v_bshd[i, :n] = kv_shd[offset : offset + n]
             offset += n
 
         ref = _per_seq_sdpa_ref(
-            q_shd, kv_shd, kv_shd, cum_seq_lens_q.tolist(), cum_seq_lens_kv.tolist(),
-            num_heads_q, num_heads_kv, head_dim, device, scale, is_causal=False,
+            q_shd,
+            kv_shd,
+            kv_shd,
+            cum_seq_lens_q.tolist(),
+            cum_seq_lens_kv.tolist(),
+            num_heads_q,
+            num_heads_kv,
+            head_dim,
+            device,
+            scale,
+            is_causal=False,
         )
 
         new_o = _run_var_len_paged_attn(
-            paged_attn, q_shd, k_bshd, v_bshd, kv_cache, block_tables,
-            block_size, cum_seq_lens_q, cum_seq_lens_kv, seq_lens_kv, max_kv_per_seq,
+            paged_attn,
+            q_shd,
+            k_bshd,
+            v_bshd,
+            kv_cache,
+            block_tables,
+            block_size,
+            cum_seq_lens_q,
+            cum_seq_lens_kv,
+            seq_lens_kv,
+            max_kv_per_seq,
         )
 
         assert ref.shape == new_o.shape
@@ -417,36 +592,59 @@ def test_torch_paged_attn_prefill_with_existing_kv(model_config, device):
     )
 
     with torch.no_grad():
-        existing_k = torch.rand(n_batch, n_existing, num_heads_kv, head_dim, device=device)
-        existing_v = torch.rand(n_batch, n_existing, num_heads_kv, head_dim, device=device)
-        new_k = torch.rand(n_batch, n_prefill, num_heads_kv, head_dim, device=device)
-        new_v = torch.rand(n_batch, n_prefill, num_heads_kv, head_dim, device=device)
+        existing_k = torch.rand(
+            n_batch, n_existing, num_heads_kv, head_dim, device=device
+        )
+        existing_v = torch.rand(
+            n_batch, n_existing, num_heads_kv, head_dim, device=device
+        )
+        new_k = torch.rand(
+            n_batch, n_prefill, num_heads_kv, head_dim, device=device
+        )
+        new_v = torch.rand(
+            n_batch, n_prefill, num_heads_kv, head_dim, device=device
+        )
 
         k_full_bshd = torch.cat([existing_k, new_k], dim=1)
         v_full_bshd = torch.cat([existing_v, new_v], dim=1)
-        q = torch.rand(n_batch, n_prefill, num_heads_q, head_dim, device=device).transpose(1, 2)
+        q = torch.rand(
+            n_batch, n_prefill, num_heads_q, head_dim, device=device
+        ).transpose(1, 2)
 
         # 构造因果掩码: 新 token 在绝对位置 [16, 17, 18, 19]
         q_pos = torch.arange(n_existing, n_seq, device=device)
         kv_pos = torch.arange(n_seq, device=device)
         causal_mask_bool = q_pos[:, None] < kv_pos[None, :]
         attn_mask = torch.zeros(n_prefill, n_seq, device=device, dtype=q.dtype)
-        attn_mask = attn_mask.masked_fill(causal_mask_bool, float('-inf'))
+        attn_mask = attn_mask.masked_fill(causal_mask_bool, float("-inf"))
 
-        scale = model_config.head_dim ** -0.5
+        scale = model_config.head_dim**-0.5
         ref = F.scaled_dot_product_attention(
-            q, k_full_bshd.transpose(1, 2), v_full_bshd.transpose(1, 2),
-            attn_mask=attn_mask, scale=scale, enable_gqa=True,
+            q,
+            k_full_bshd.transpose(1, 2),
+            v_full_bshd.transpose(1, 2),
+            attn_mask=attn_mask,
+            scale=scale,
+            enable_gqa=True,
         )
 
         slot_mapping = _build_slot_mapping(
-            block_tables, n_seq, n_seq, block_size, device,
+            block_tables,
+            n_seq,
+            n_seq,
+            block_size,
+            device,
         )
         new_o = _run_paged_attn(
-            paged_attn, q,
-            k_full_bshd.transpose(1, 2), v_full_bshd.transpose(1, 2),
-            kv_cache, block_tables, block_size,
-            slot_mapping, cache_position=n_seq - 1,
+            paged_attn,
+            q,
+            k_full_bshd.transpose(1, 2),
+            v_full_bshd.transpose(1, 2),
+            kv_cache,
+            block_tables,
+            block_size,
+            slot_mapping,
+            cache_position=n_seq - 1,
         )
 
         assert ref.shape == new_o.shape
@@ -478,30 +676,54 @@ def _build_var_len_slot_mapping(block_tables, seq_lens, block_size, device):
 
 def _create_scattered_block_tables(n_seqs, blocks_per_seq, device):
     """打散的 block_tables: 页号逆序, 证明 kernel 走间接寻址而非顺序假设。"""
-    ids = torch.arange(
-        n_seqs * blocks_per_seq, device=device
-    ).reshape(n_seqs, blocks_per_seq)
+    ids = torch.arange(n_seqs * blocks_per_seq, device=device).reshape(
+        n_seqs, blocks_per_seq
+    )
     return ids.flip(0).flip(1)
 
 
-def _run_flash_attn_varlen_continuous(q_shd, k_shd, v_shd, cum_seq_lens_q,
-                                      cum_seq_lens_kv, max_seqlen_q, max_seqlen_k,
-                                      scale, causal=True):
+def _run_flash_attn_varlen_continuous(
+    q_shd,
+    k_shd,
+    v_shd,
+    cum_seq_lens_q,
+    cum_seq_lens_kv,
+    max_seqlen_q,
+    max_seqlen_k,
+    scale,
+    causal=True,
+):
     """连续内存路径: block_table=None, k/v 直接传连续 SHD。"""
     from qwen3_from_scratch.kernels.triton.paged_attn import (
         flash_attn_varlen_func,
     )
+
     return flash_attn_varlen_func(
-        q_shd, k_shd, v_shd,
-        max_seqlen_q=max_seqlen_q, cu_seqlens_q=cum_seq_lens_q,
-        max_seqlen_k=max_seqlen_k, cu_seqlens_k=cum_seq_lens_kv,
-        softmax_scale=scale, causal=causal, block_table=None,
+        q_shd,
+        k_shd,
+        v_shd,
+        max_seqlen_q=max_seqlen_q,
+        cu_seqlens_q=cum_seq_lens_q,
+        max_seqlen_k=max_seqlen_k,
+        cu_seqlens_k=cum_seq_lens_kv,
+        softmax_scale=scale,
+        causal=causal,
+        block_table=None,
     )
 
 
-def _run_flash_attn_varlen_paged(model_config, q_shd, kv_shd, seq_lens_kv,
-                                 cum_seq_lens_q, cum_seq_lens_kv,
-                                 max_seqlen_q, max_seqlen_k, scale, layer_idx=0):
+def _run_flash_attn_varlen_paged(
+    model_config,
+    q_shd,
+    kv_shd,
+    seq_lens_kv,
+    cum_seq_lens_q,
+    cum_seq_lens_kv,
+    max_seqlen_q,
+    max_seqlen_k,
+    scale,
+    layer_idx=0,
+):
     """分页路径: kv 写入 PagedKVCache, flash_attn_varlen_func 从缓存基地址 + block_table 读。"""
     from qwen3_from_scratch.kernels.triton.paged_attn import (
         flash_attn_varlen_func,
@@ -511,12 +733,22 @@ def _run_flash_attn_varlen_paged(model_config, q_shd, kv_shd, seq_lens_kv,
     n_seqs = len(seq_lens_kv)
     max_kv_per_seq = max(seq_lens_kv)
     kv_cache, _ = _create_kv_cache(
-        model_config, n_seqs, max_kv_per_seq, block_size, layer_idx, q_shd.device,
+        model_config,
+        n_seqs,
+        max_kv_per_seq,
+        block_size,
+        layer_idx,
+        q_shd.device,
     )
     blocks_per_seq = (max_kv_per_seq + block_size - 1) // block_size
-    block_tables = _create_scattered_block_tables(n_seqs, blocks_per_seq, q_shd.device)
+    block_tables = _create_scattered_block_tables(
+        n_seqs, blocks_per_seq, q_shd.device
+    )
     slot_mapping = _build_var_len_slot_mapping(
-        block_tables, seq_lens_kv, block_size, q_shd.device,
+        block_tables,
+        seq_lens_kv,
+        block_size,
+        q_shd.device,
     )
 
     context = ModelContext(
@@ -532,10 +764,16 @@ def _run_flash_attn_varlen_paged(model_config, q_shd, kv_shd, seq_lens_kv,
         kv_cache.update(kv_shd, kv_shd, layer_idx)
         k_cache, v_cache = kv_cache.get(layer_idx)
         return flash_attn_varlen_func(
-            q_shd, k_cache, v_cache,
-            max_seqlen_q=max_seqlen_q, cu_seqlens_q=cum_seq_lens_q,
-            max_seqlen_k=max_seqlen_k, cu_seqlens_k=cum_seq_lens_kv,
-            softmax_scale=scale, causal=True, block_table=block_tables,
+            q_shd,
+            k_cache,
+            v_cache,
+            max_seqlen_q=max_seqlen_q,
+            cu_seqlens_q=cum_seq_lens_q,
+            max_seqlen_k=max_seqlen_k,
+            cu_seqlens_k=cum_seq_lens_kv,
+            softmax_scale=scale,
+            causal=True,
+            block_table=block_tables,
         )
     finally:
         set_forward_context(old_context)
@@ -548,7 +786,7 @@ def test_flash_attn_varlen_continuous_prefill(model_config):
     num_heads_q = model_config.num_attention_heads
     num_heads_kv = model_config.num_key_value_heads
     head_dim = model_config.head_dim
-    scale = head_dim ** -0.5
+    scale = head_dim**-0.5
 
     seq_lens = [4, 8]
     cum = torch.tensor([0, 4, 12], dtype=torch.int32, device=device)
@@ -558,12 +796,27 @@ def test_flash_attn_varlen_continuous_prefill(model_config):
     kv_shd = torch.rand(total, num_heads_kv, head_dim, device=device)
 
     ref = _per_seq_sdpa_ref(
-        q_shd, kv_shd, kv_shd, cum.tolist(), cum.tolist(),
-        num_heads_q, num_heads_kv, head_dim, device, scale, is_causal=True,
+        q_shd,
+        kv_shd,
+        kv_shd,
+        cum.tolist(),
+        cum.tolist(),
+        num_heads_q,
+        num_heads_kv,
+        head_dim,
+        device,
+        scale,
+        is_causal=True,
     )
     o = _run_flash_attn_varlen_continuous(
-        q_shd, kv_shd, kv_shd, cum, cum,
-        max(seq_lens), max(seq_lens), scale,
+        q_shd,
+        kv_shd,
+        kv_shd,
+        cum,
+        cum,
+        max(seq_lens),
+        max(seq_lens),
+        scale,
     )
 
     assert o.shape == ref.shape
@@ -577,7 +830,7 @@ def test_flash_attn_varlen_paged_prefill(model_config):
     num_heads_q = model_config.num_attention_heads
     num_heads_kv = model_config.num_key_value_heads
     head_dim = model_config.head_dim
-    scale = head_dim ** -0.5
+    scale = head_dim**-0.5
 
     seq_lens_kv = [4, 8]
     cum = torch.tensor([0, 4, 12], dtype=torch.int32, device=device)
@@ -587,12 +840,28 @@ def test_flash_attn_varlen_paged_prefill(model_config):
     kv_shd = torch.rand(total, num_heads_kv, head_dim, device=device)
 
     ref = _per_seq_sdpa_ref(
-        q_shd, kv_shd, kv_shd, cum.tolist(), cum.tolist(),
-        num_heads_q, num_heads_kv, head_dim, device, scale, is_causal=True,
+        q_shd,
+        kv_shd,
+        kv_shd,
+        cum.tolist(),
+        cum.tolist(),
+        num_heads_q,
+        num_heads_kv,
+        head_dim,
+        device,
+        scale,
+        is_causal=True,
     )
     o = _run_flash_attn_varlen_paged(
-        model_config, q_shd, kv_shd, seq_lens_kv,
-        cum, cum, max(seq_lens_kv), max(seq_lens_kv), scale,
+        model_config,
+        q_shd,
+        kv_shd,
+        seq_lens_kv,
+        cum,
+        cum,
+        max(seq_lens_kv),
+        max(seq_lens_kv),
+        scale,
     )
 
     assert o.shape == ref.shape
@@ -609,7 +878,7 @@ def test_flash_attn_varlen_continuous_segmented_prefill(model_config):
     num_heads_q = model_config.num_attention_heads
     num_heads_kv = model_config.num_key_value_heads
     head_dim = model_config.head_dim
-    scale = head_dim ** -0.5
+    scale = head_dim**-0.5
 
     seq_lens_q = [4, 8]
     seq_lens_kv = [20, 24]  # 16 已缓存 + 新 4/8
@@ -622,12 +891,27 @@ def test_flash_attn_varlen_continuous_segmented_prefill(model_config):
     kv_shd = torch.rand(total_kv, num_heads_kv, head_dim, device=device)
 
     ref = _per_seq_sdpa_ref(
-        q_shd, kv_shd, kv_shd, cum_q.tolist(), cum_kv.tolist(),
-        num_heads_q, num_heads_kv, head_dim, device, scale, is_causal=True,
+        q_shd,
+        kv_shd,
+        kv_shd,
+        cum_q.tolist(),
+        cum_kv.tolist(),
+        num_heads_q,
+        num_heads_kv,
+        head_dim,
+        device,
+        scale,
+        is_causal=True,
     )
     o = _run_flash_attn_varlen_continuous(
-        q_shd, kv_shd, kv_shd, cum_q, cum_kv,
-        max(seq_lens_q), max(seq_lens_kv), scale,
+        q_shd,
+        kv_shd,
+        kv_shd,
+        cum_q,
+        cum_kv,
+        max(seq_lens_q),
+        max(seq_lens_kv),
+        scale,
     )
 
     assert o.shape == ref.shape
@@ -641,7 +925,7 @@ def test_flash_attn_varlen_paged_segmented_prefill(model_config):
     num_heads_q = model_config.num_attention_heads
     num_heads_kv = model_config.num_key_value_heads
     head_dim = model_config.head_dim
-    scale = head_dim ** -0.5
+    scale = head_dim**-0.5
 
     seq_lens_q = [4, 8]
     seq_lens_kv = [20, 24]  # 16 已缓存 + 新 4/8
@@ -654,12 +938,28 @@ def test_flash_attn_varlen_paged_segmented_prefill(model_config):
     kv_shd = torch.rand(total_kv, num_heads_kv, head_dim, device=device)
 
     ref = _per_seq_sdpa_ref(
-        q_shd, kv_shd, kv_shd, cum_q.tolist(), cum_kv.tolist(),
-        num_heads_q, num_heads_kv, head_dim, device, scale, is_causal=True,
+        q_shd,
+        kv_shd,
+        kv_shd,
+        cum_q.tolist(),
+        cum_kv.tolist(),
+        num_heads_q,
+        num_heads_kv,
+        head_dim,
+        device,
+        scale,
+        is_causal=True,
     )
     o = _run_flash_attn_varlen_paged(
-        model_config, q_shd, kv_shd, seq_lens_kv,
-        cum_q, cum_kv, max(seq_lens_q), max(seq_lens_kv), scale,
+        model_config,
+        q_shd,
+        kv_shd,
+        seq_lens_kv,
+        cum_q,
+        cum_kv,
+        max(seq_lens_q),
+        max(seq_lens_kv),
+        scale,
     )
 
     assert o.shape == ref.shape
@@ -673,7 +973,7 @@ def test_flash_attn_varlen_single_request_smoke(model_config):
     num_heads_q = model_config.num_attention_heads
     num_heads_kv = model_config.num_key_value_heads
     head_dim = model_config.head_dim
-    scale = head_dim ** -0.5
+    scale = head_dim**-0.5
 
     seq_lens_kv = [8]
     cum = torch.tensor([0, 8], dtype=torch.int32, device=device)
@@ -683,16 +983,34 @@ def test_flash_attn_varlen_single_request_smoke(model_config):
     kv_shd = torch.rand(total, num_heads_kv, head_dim, device=device)
 
     ref = _per_seq_sdpa_ref(
-        q_shd, kv_shd, kv_shd, cum.tolist(), cum.tolist(),
-        num_heads_q, num_heads_kv, head_dim, device, scale, is_causal=True,
+        q_shd,
+        kv_shd,
+        kv_shd,
+        cum.tolist(),
+        cum.tolist(),
+        num_heads_q,
+        num_heads_kv,
+        head_dim,
+        device,
+        scale,
+        is_causal=True,
     )
     o = _run_flash_attn_varlen_paged(
-        model_config, q_shd, kv_shd, seq_lens_kv,
-        cum, cum, max(seq_lens_kv), max(seq_lens_kv), scale,
+        model_config,
+        q_shd,
+        kv_shd,
+        seq_lens_kv,
+        cum,
+        cum,
+        max(seq_lens_kv),
+        max(seq_lens_kv),
+        scale,
     )
 
     assert o.shape == ref.shape
     assert torch.allclose(o, ref, atol=1e-5)
+
+
 # ---------------------------------------------------------------------------
 # PagedKVCache._update_var_len (分页写入) 测试
 #
@@ -707,7 +1025,9 @@ def test_flash_attn_varlen_single_request_smoke(model_config):
 # ---------------------------------------------------------------------------
 
 
-def _scatter_reference(kv_cache, k_shd, v_shd, slot_mapping, layer_idx, block_size):
+def _scatter_reference(
+    kv_cache, k_shd, v_shd, slot_mapping, layer_idx, block_size
+):
     """独立参考: 基于未写入前的缓存克隆, 向量化 scatter 期望值。
 
     未写槽位保持原样(与 torch.empty 初始内容一致), 只改写有效 slot 对应位置,
@@ -724,10 +1044,15 @@ def _scatter_reference(kv_cache, k_shd, v_shd, slot_mapping, layer_idx, block_si
     return ref_k, ref_v
 
 
-def _run_update_var_len(kv_cache, k_shd, v_shd, slot_mapping, layer_idx, block_size):
+def _run_update_var_len(
+    kv_cache, k_shd, v_shd, slot_mapping, layer_idx, block_size
+):
     """在同一 context 中执行 PagedKVCache.update()。k_shd/v_shd 为 SHD (3D)。"""
     context = ModelContext(
-        use_cache=True, kv_cache=kv_cache, block_size=block_size, slot_mapping=slot_mapping,
+        use_cache=True,
+        kv_cache=kv_cache,
+        block_size=block_size,
+        slot_mapping=slot_mapping,
     )
     old_context = get_forward_context()
     try:
@@ -742,8 +1067,13 @@ def _make_paged_cache(model_config, num_pages, block_size, layer_idx, device):
     num_heads_kv = model_config.num_key_value_heads
     head_dim = model_config.head_dim
     return PagedKVCache(
-        num_blocks=num_pages, layers=1, num_heads=num_heads_kv, head_dim=head_dim,
-        dtype=torch.float32, block_size=block_size, device=device,
+        num_blocks=num_pages,
+        layers=1,
+        num_heads=num_heads_kv,
+        head_dim=head_dim,
+        dtype=torch.float32,
+        block_size=block_size,
+        device=device,
     )
 
 
@@ -773,14 +1103,22 @@ def test_update_var_len_scatter(model_config, device):
     num_heads = model_config.num_key_value_heads
     head_dim = model_config.head_dim
 
-    slot_mapping = _scattered_slot_mapping(block_ids, seq_len, block_size, device)
+    slot_mapping = _scattered_slot_mapping(
+        block_ids, seq_len, block_size, device
+    )
     k_shd = torch.rand(seq_len, num_heads, head_dim, device=device)
     v_shd = torch.rand(seq_len, num_heads, head_dim, device=device)
 
-    kv_cache = _make_paged_cache(model_config, num_pages, block_size, layer_idx, device)
-    ref_k, ref_v = _scatter_reference(kv_cache, k_shd, v_shd, slot_mapping, layer_idx, block_size)
+    kv_cache = _make_paged_cache(
+        model_config, num_pages, block_size, layer_idx, device
+    )
+    ref_k, ref_v = _scatter_reference(
+        kv_cache, k_shd, v_shd, slot_mapping, layer_idx, block_size
+    )
 
-    got_k, got_v = _run_update_var_len(kv_cache, k_shd, v_shd, slot_mapping, layer_idx, block_size)
+    got_k, got_v = _run_update_var_len(
+        kv_cache, k_shd, v_shd, slot_mapping, layer_idx, block_size
+    )
 
     assert torch.equal(got_k, ref_k)
     assert torch.equal(got_v, ref_v)
@@ -804,10 +1142,16 @@ def test_update_var_len_skips_invalid_slots(model_config, device):
     k_shd = torch.rand(seq_len, num_heads, head_dim, device=device)
     v_shd = torch.rand(seq_len, num_heads, head_dim, device=device)
 
-    kv_cache = _make_paged_cache(model_config, num_pages, block_size, layer_idx, device)
-    ref_k, ref_v = _scatter_reference(kv_cache, k_shd, v_shd, slot_mapping, layer_idx, block_size)
+    kv_cache = _make_paged_cache(
+        model_config, num_pages, block_size, layer_idx, device
+    )
+    ref_k, ref_v = _scatter_reference(
+        kv_cache, k_shd, v_shd, slot_mapping, layer_idx, block_size
+    )
 
-    got_k, got_v = _run_update_var_len(kv_cache, k_shd, v_shd, slot_mapping, layer_idx, block_size)
+    got_k, got_v = _run_update_var_len(
+        kv_cache, k_shd, v_shd, slot_mapping, layer_idx, block_size
+    )
 
     assert torch.equal(got_k, ref_k)
     assert torch.equal(got_v, ref_v)
