@@ -124,6 +124,34 @@ class TestSchedule:
         assert len(reqs) == 1
         assert reqs[0].req_id == seq3.req_id
 
+    def test_decode_restricted_by_max_token_num(self):
+        scheduler = make_scheduler(max_num_tokens=7, max_num_seqs=1000)
+        for _ in range(9):
+            scheduler.add_request(Sequence([0] * 2))
+        reqs = scheduler.schedule()
+        scheduler.post_process(reqs, [0]*len(reqs))
+        reqs = scheduler.schedule()
+        scheduler.post_process(reqs, [0]*len(reqs))
+        reqs = scheduler.schedule()
+        scheduler.post_process(reqs, [0]*len(reqs))
+        # 此时有9个解码，但受限于长度只能调度7个
+        reqs = scheduler.schedule()
+        assert len(reqs) == 7
+
+    def test_decode_restricted_by_max_seq_num(self):
+        scheduler = make_scheduler(max_num_tokens=1000, max_num_seqs=5)
+        for _ in range(9):
+            scheduler.add_request(Sequence([0] * 2))
+        reqs = scheduler.schedule()
+        scheduler.post_process(reqs, [0]*len(reqs))
+        reqs = scheduler.schedule()
+        scheduler.post_process(reqs, [0]*len(reqs))
+        reqs = scheduler.schedule()
+        scheduler.post_process(reqs, [0]*len(reqs))
+        # 此时有9个解码，但受限于长度只能调度5个
+        reqs = scheduler.schedule()
+        assert len(reqs) == 5
+
 
 class TestPostProcess:
     def test_append_token_id(self):

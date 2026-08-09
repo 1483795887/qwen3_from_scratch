@@ -58,12 +58,28 @@ class Scheduler:
                 break
         return scheduled_reqs
 
+    def schedule_decode(self) -> list[Sequence]:
+        scheduled_reqs = []
+        waiting_nums = len(self.active)
+        for i in range(waiting_nums):
+            seq = self.active[0]
+            assert seq.block_tables
+            if not self.block_manager.can_append(seq):
+                # decode 都是申请一个的，如果一个都不能申请后面也都申请不了
+                break
+            self.block_manager.append_block(seq)
+            scheduled_reqs.append(seq)
+            if len(scheduled_reqs) >= min(self.max_num_seqs, self.max_num_tokens):
+                break
+        return scheduled_reqs
+
+
     def schedule(self) -> list[Sequence]:
         scheduled_reqs = self.schedule_prefill()
 
         if scheduled_reqs:
             return scheduled_reqs
-        return []
+        return self.schedule_decode()
 
     def post_process(self, seqs: list[Sequence], token_ids: list[int]):
         for seq, token_id in zip(seqs, token_ids):
