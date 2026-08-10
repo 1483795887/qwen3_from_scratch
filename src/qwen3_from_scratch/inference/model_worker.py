@@ -198,6 +198,7 @@ class ModelWorker:
         )
         set_forward_context(context)
 
+    @torch.inference_mode
     def forward(self, seqs: list[Sequence]):
         # 先构建context，然后调用
         assert len(seqs)
@@ -212,9 +213,8 @@ class ModelWorker:
         logits = self.model(inputs)
 
         if is_prefill:
-            indices = torch.tensor(
-                [len(seq) - 1 for seq in seqs], device=self.device
-            )
+            context = get_forward_context()
+            indices = context.cum_seq_lens_q[1:] - 1
             logits = logits[indices]  # [B, vocab]
         next_ids = self.sampler(logits)
         return next_ids[:, 0].tolist()  # length B
