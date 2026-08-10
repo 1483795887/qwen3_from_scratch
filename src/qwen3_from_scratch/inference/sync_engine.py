@@ -34,9 +34,17 @@ class SyncEngine:
       - 接口全部同步：generate_stream / generate / batch_generate / warmup。
     """
 
-    def __init__(self, config_path: str, model_name: str):
+    def __init__(self, config_path: str, model_name: str, log_interval: int = 0):
+        """
+        Args:
+            config_path: 批处理配置文件路径。
+            model_name: 模型名称。
+            log_interval: 生成过程中统计日志的打印间隔（步数）。
+                <=0 表示不打印；>0 表示每 log_interval 步打印一次。
+        """
         self.config: BatchConfig = load_batch_config(config_path)
         self.model_name = model_name
+        self.log_interval = log_interval
         if model_name not in self.config.list_model_names():
             raise KeyError(f"模型 {model_name} 不可用")
 
@@ -111,11 +119,13 @@ class SyncEngine:
         try:
             for seq in seqs:
                 self.driver.add_request(seq)
+            step_count = 0
             while pending:
                 planned = self.driver.step([])
                 if not planned:
                     time.sleep(0.001)
                     continue
+                step_count += 1
                 now = time.perf_counter()
                 for seq in planned:
                     if seq.req_id not in pending:
@@ -136,6 +146,7 @@ class SyncEngine:
                             total_elapsed=now - start,
                         )
                         pending.discard(seq.req_id)
+                self._maybe_log_batch_step(step_count, len(pending), len(seqs) - len(pending), seqs, now, request_start)
         finally:
             if max_new_tokens is not None:
                 self.config.generation.max_new_tokens = old
@@ -169,6 +180,7 @@ class SyncEngine:
         while True:
             planned = self.driver.step([])
             if not planned:
+                time.sleep(0.001)
                 continue
             now = time.perf_counter()
             for s in planned:
@@ -195,6 +207,7 @@ class SyncEngine:
                         tps=tps,
                         total_elapsed=total_elapsed,
                     )
+                self._maybe_log_step(token_count, metrics)
                 delta = self.tokenizer.decode([s.last_token_id], skip_special_tokens=True)
                 yield StreamChunk(delta=delta, metrics=metrics)
                 if s.status == SequenceStatus.FINISHED:
@@ -226,6 +239,47 @@ class SyncEngine:
         return self.tokenizer.decode(tail, skip_special_tokens=True)
 
     def _check_seq_finish(self, seq: Sequence) -> bool:
-        return (seq.last_token_id == self.tokenizer.eos_token_id) or (
-            seq.generated_lens > self.config.generation.max_new_tokens
+        eos_ids = self.tokenizer.eos_token_id
+        if isinstance(eos_ids, int):
+            eos_hit = seq.last_token_id == eos_ids
+        else:
+            eos_hit = seq.last_token_id in eos_ids
+        return eos_hit or (
+            seq.generated_lens >= self.config.generation.max_new_tokens
+        )
+
+    # ── 统计日志 ────────────────────────────────
+
+    def _maybe_log_step(self, token_count: int, metrics: PerfMetrics) -> None:
+        """单请求模式下，每 log_interval 步打印一次中间统计。"""
+        if self.log_interval <= 0:
+            return
+        if token_count % self.log_interval != 0:
+            return
+        logger.info(
+            "[stream] step=%d  TTFT=%.4fs  tokens=%d  TPS=%.2f  elapsed=%.4fs",
+            token_count, metrics.ttft, metrics.token_count, metrics.tps, metrics.total_elapsed,
+        )
+
+    def _maybe_log_batch_step(
+        self,
+        step_count: int,
+        pending: int,
+        completed: int,
+        seqs: list[Sequence],
+        now: float,
+        request_start: dict[str, float],
+    ) -> None:
+        """批量模式下，每 log_interval 步打印一次中间统计。"""
+        if self.log_interval <= 0:
+            return
+        if step_count % self.log_interval != 0:
+            return
+        total_tokens_so_far = sum(s.generated_lens for s in seqs)
+        batch_start = min(request_start.values())
+        elapsed = now - batch_start
+        aggregate_tps = total_tokens_so_far / elapsed if elapsed > 0 else 0.0
+        logger.info(
+            "[batch] step=%d  pending=%d  completed=%d  total_tokens=%d  aggregate_tps=%.2f  elapsed=%.4fs",
+            step_count, pending, completed, total_tokens_so_far, aggregate_tps, elapsed,
         )
