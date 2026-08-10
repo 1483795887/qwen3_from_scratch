@@ -36,7 +36,7 @@ class BlockManager:
         return len(self.free_blocks) > 0
 
     def append_block(self, seq: Sequence):
-        if (len(seq) + 1) % self.block_size != 1:
+        if len(seq) % self.block_size != 1:
             return
         seq.block_tables.append(self._allocate())
 
