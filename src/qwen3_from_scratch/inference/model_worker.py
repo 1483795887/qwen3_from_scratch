@@ -54,7 +54,9 @@ class ModelWorker:
             alloc_mem,
             model_config.num_hidden_layers,
             model_config.num_key_value_heads,
-            model_config.hidden_size,
+            model_config.head_dim,
+            device=model_info.device,
+            dtype=config.kv_cache_dtype,
         )
         kv_cache = PagedKVCache(
             blocks,
