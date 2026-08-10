@@ -13,6 +13,7 @@ from qwen3_from_scratch.inference.model_manager import ModelManager
 from qwen3_from_scratch.inference.model_worker import ModelWorker
 from qwen3_from_scratch.inference.scheduler import Scheduler, SchedulerConfig
 from qwen3_from_scratch.inference.sequence import Sequence, SequenceStatus
+from qwen3_from_scratch.inference.scheduler_driver import SchedulerDriver
 
 logger = get_logger(__name__)
 
@@ -149,24 +150,29 @@ class LLMEngine:
         )
         # worker 已加载完模型并上报块数，此后请求的 TTFT 不再包含加载耗时
         self._ready_event.set()
+
+        def worker_forward(seqs: list[Sequence]) -> list[int]:
+            self.request_queue.put(seqs)
+            return self.response_queue.get()
+
+        self.driver = SchedulerDriver(scheduler, worker_forward)
         while not self.finished:
             # 接收请求
             reqs = self._get_incoming_requests()
             if reqs:
                 logger.debug(f"get {len(reqs)} reqs")
+            new_seqs = []
             for req in reqs:
                 token_ids = self.tokenizer(req.prompt)
                 seq = Sequence(token_ids.input_ids, req_id=req.req_id)
                 self.requests[req.req_id] = req
-                scheduler.add_request(seq)
-            # 调度
-            seqs = scheduler.schedule()
+                new_seqs.append(seq)
+            seqs = self.driver.step(
+                new_seqs
+            )  # 共享调度驱动：入队、调度、推理、回填
             if len(seqs) == 0:
                 time.sleep(0.1)
                 continue
-            self.request_queue.put(seqs)
-            result_token_ids = self.response_queue.get()
-            scheduler.post_process(seqs, result_token_ids)
             self._post_process(seqs)
         # 约定，发送长度为0的就是结束
         self.request_queue.put([])

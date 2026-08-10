@@ -69,9 +69,7 @@ class Scheduler:
 
     def schedule_decode(self) -> list[Sequence]:
         scheduled_reqs = []
-        waiting_nums = len(self.active)
-        for i in range(waiting_nums):
-            seq = self.active[0]
+        for seq in self.active:
             assert seq.block_tables
             if not self.block_manager.can_append(seq):
                 # decode 都是申请一个的，如果一个都不能申请后面也都申请不了
