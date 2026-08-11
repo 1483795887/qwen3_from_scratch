@@ -84,7 +84,7 @@ class Scheduler:
 
     def schedule_decode(self) -> list[Sequence]:
         scheduled_reqs = []
-        while self.active and len(scheduled_reqs) < self.max_num_seqs:
+        while self.active and len(scheduled_reqs) < min(self.max_num_seqs, self.max_num_tokens):
             seq = self.active.popleft()
             assert seq.block_tables
             while not self.block_manager.can_append(seq):
@@ -98,6 +98,7 @@ class Scheduler:
             else:
                 self.block_manager.append_block(seq)
                 scheduled_reqs.append(seq)
+        self.active.extendleft(reversed(scheduled_reqs))
         return scheduled_reqs
 
     def schedule(self) -> list[Sequence]:

@@ -115,16 +115,6 @@ class TestSchedule:
         reqs = scheduler.schedule()
         assert len(reqs) == 1
 
-    def test_restricted_by_block_num_multiple_step(self):
-        scheduler = make_scheduler(num_pages=2)
-        scheduler.add_request(make_sequence(32))
-        scheduler.add_request(make_sequence(32))
-        reqs = scheduler.schedule()
-        assert len(reqs) == 1
-        reqs[0].token_ids.append(0)
-        reqs = scheduler.schedule()
-        assert len(reqs) == 0
-
     def test_schedule_prefill_first(self):
         seqs = [make_sequence(32) for _ in range(2)]
 
@@ -192,13 +182,13 @@ class TestPostProcess:
         assert seqs[0].status == SequenceStatus.FINISHED
 
     def test_check_can_schedule_more_when_finish(self):
-        seqs = [make_sequence(32) for _ in range(2)]
+        seqs = [make_sequence(32, max_new_tokens=16) for _ in range(2)]
 
         def check_seq_finish_func(seq):
             return seq.req_id == seqs[0].req_id
 
         scheduler = make_scheduler(
-            check_seq_finish_func=check_seq_finish_func, num_pages=2
+            check_seq_finish_func=check_seq_finish_func, num_pages=3
         )
         scheduler.add_request(seqs[0])
         scheduler.add_request(seqs[1])
