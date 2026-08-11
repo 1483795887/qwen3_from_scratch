@@ -12,7 +12,7 @@ async def main():
     engine = LLMEngine(get_config_path(), "qwen3-0.6b")
     await engine.warmup()
     async for chunk in engine.generate_stream(
-        [{"role": "user", "content": "介绍一下自己"}]
+        [{"role": "user", "content": "介绍一下自己"}], max_new_tokens=50
     ):
         print(chunk.delta, end="")
 

@@ -15,7 +15,10 @@ def test_build_context_decode_position_is_last_token_index():
     # 不加载真实模型, 只测 context 构建: 跳过 __init__, 只给 device
     worker = ModelWorker.__new__(ModelWorker)
     worker.device = torch.device("cpu")
-    seqs = [Sequence(list(range(5))), Sequence(list(range(3)))]
+    seqs = [
+        Sequence(list(range(5)), max_new_tokens=10),
+        Sequence(list(range(3)), max_new_tokens=10),
+    ]
     for idx, seq in enumerate(seqs):
         # 模拟调度后状态: 已分配页 + 一轮 post_process 追加生成的 token
         seq.block_tables = [idx]

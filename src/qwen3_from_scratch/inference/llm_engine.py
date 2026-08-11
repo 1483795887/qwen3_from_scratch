@@ -31,12 +31,14 @@ class Request:
         loop: AbstractEventLoop,
         queue: Queue[RequestResult],
         is_streaming: bool = True,
+        max_new_tokens: int | None = None,
     ):
         self.req_id = str(uuid4())
         self.prompt = prompt
         self.loop = loop
         self.queue = queue
         self.is_streaming = is_streaming
+        self.max_new_tokens = max_new_tokens
 
 
 @dataclass
@@ -121,7 +123,7 @@ class LLMEngine:
 
     def _check_seq_finish(self, seq: Sequence):
         return (seq.last_token_id == self.tokenizer.eos_token_id) or (
-            seq.generated_lens > self.config.generation.max_new_tokens
+            seq.generated_lens > seq.max_new_tokens
         )
 
     def _get_incoming_requests(self) -> list[Request]:
@@ -164,7 +166,16 @@ class LLMEngine:
             new_seqs = []
             for req in reqs:
                 token_ids = self.tokenizer(req.prompt)
-                seq = Sequence(token_ids.input_ids, req_id=req.req_id)
+                max_new_tokens = (
+                    req.max_new_tokens
+                    if req.max_new_tokens
+                    else self.config.generation.max_new_tokens
+                )
+                seq = Sequence(
+                    token_ids.input_ids,
+                    req_id=req.req_id,
+                    max_new_tokens=max_new_tokens,
+                )
                 self.requests[req.req_id] = req
                 new_seqs.append(seq)
             seqs = self.driver.step(
@@ -178,7 +189,7 @@ class LLMEngine:
         self.request_queue.put([])
 
     async def generate_stream(
-        self, prompt: str | list[dict]
+        self, prompt: str | list[dict], max_new_tokens: int | None = None
     ) -> AsyncIterator[StreamChunk]:
         """异步流式生成，yield StreamChunk（解码文本 + 性能指标）。"""
         queue: asyncio.Queue[RequestResult] = asyncio.Queue()
@@ -186,7 +197,15 @@ class LLMEngine:
             prompt = self.tokenizer.apply_chat_template(
                 prompt, tokenize=False, add_generation_prompt=True
             )
-        request = Request(prompt, asyncio.get_event_loop(), queue, True)
+        request = Request(
+            prompt,
+            asyncio.get_event_loop(),
+            queue,
+            True,
+            max_new_tokens=max_new_tokens
+            if max_new_tokens
+            else self.config.generation.max_new_tokens,
+        )
         logger.debug(f"put req: {request.req_id}")
 
         start_time = time.perf_counter()
