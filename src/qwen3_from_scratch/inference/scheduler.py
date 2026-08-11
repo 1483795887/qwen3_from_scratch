@@ -20,6 +20,7 @@ class Scheduler:
         config: SchedulerConfig,
         check_seq_finish_func: Callable[[Sequence], bool] = lambda seq: False,
     ):
+        self.config = config
         self.check_seq_finish_func = check_seq_finish_func
         self.max_num_seqs = config.max_num_seqs
         self.max_num_tokens = config.max_num_tokens
@@ -32,6 +33,11 @@ class Scheduler:
 
     def add_request(self, req: Sequence):
         if len(req.prompts) > self.max_num_tokens:
+            return False
+        if (
+            len(req.prompts) + req.max_new_tokens
+            > self.config.max_blocks * self.block_size
+        ):
             return False
         self.waiting.append(req)
         return True
@@ -67,19 +73,31 @@ class Scheduler:
                 break
         return scheduled_reqs
 
+    def _preempt(self, seq: Sequence):
+        self.block_manager.deallocate(seq)
+        seq.is_prefill = True
+        seq.cached_len = 0
+        seq.token_ids = seq.prompts.copy()
+        seq.last_token_id = -1
+        seq.status = SequenceStatus.WAITING
+        self.waiting.append(seq)
+
     def schedule_decode(self) -> list[Sequence]:
         scheduled_reqs = []
-        for seq in self.active:
+        while self.active and len(scheduled_reqs) < self.max_num_seqs:
+            seq = self.active.popleft()
             assert seq.block_tables
-            if not self.block_manager.can_append(seq):
-                # decode 都是申请一个的，如果一个都不能申请后面也都申请不了
-                break
-            self.block_manager.append_block(seq)
-            scheduled_reqs.append(seq)
-            if len(scheduled_reqs) >= min(
-                self.max_num_seqs, self.max_num_tokens
-            ):
-                break
+            while not self.block_manager.can_append(seq):
+                if self.active:
+                    # 抢占最新生成的，浪费计算最少
+                    self._preempt(self.active.pop())
+                else:
+                    # 它就是最后一个解码请求，也是最新的，把自己释放了
+                    self._preempt(seq)
+                    break
+            else:
+                self.block_manager.append_block(seq)
+                scheduled_reqs.append(seq)
         return scheduled_reqs
 
     def schedule(self) -> list[Sequence]:
