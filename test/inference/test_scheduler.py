@@ -20,6 +20,10 @@ def make_scheduler(
     return Scheduler(config, check_seq_finish_func)
 
 
+def make_sequence(num_tokens: int, max_new_tokens: int = 10):
+    return Sequence([0] * num_tokens, max_new_tokens=max_new_tokens)
+
+
 class TestAddRequest:
     def test_empty_queue_when_init(self):
         scheduler = make_scheduler()
@@ -28,14 +32,14 @@ class TestAddRequest:
 
     def test_return_one_seq_when_add(self):
         scheduler = make_scheduler()
-        seq = Sequence([0] * 32)
+        seq = make_sequence(32)
         scheduler.add_request(seq)
         assert len(scheduler.active) == 0
         assert len(scheduler.waiting) == 1
 
     def test_return_false_when_prompts_more_than_max_num_tokens(self):
         scheduler = make_scheduler(max_num_tokens=100)
-        seq = Sequence([0] * 101)
+        seq = make_sequence(101)
         assert not scheduler.add_request(seq)
 
 
@@ -47,7 +51,7 @@ class TestSchedule:
 
     def test_return_added_seq(self):
         scheduler = make_scheduler()
-        seq = Sequence([0] * 32)
+        seq = make_sequence(32)
         scheduler.add_request(seq)
         scheduled_seqs = scheduler.schedule()
         assert len(scheduled_seqs) == 1
@@ -56,7 +60,7 @@ class TestSchedule:
 
     def test_fill_seq_when_schedule_prefill(self):
         scheduler = make_scheduler()
-        seq = Sequence([0] * 32)
+        seq = make_sequence(32)
         assert seq.status == SequenceStatus.WAITING
         scheduler.add_request(seq)
         scheduled_seqs = scheduler.schedule()
@@ -70,14 +74,14 @@ class TestSchedule:
     def test_restricted_by_max_seq_num(self):
         scheduler = make_scheduler(max_num_tokens=1000, max_num_seqs=2)
         for _ in range(100):
-            scheduler.add_request(Sequence([0] * 2))
+            scheduler.add_request(make_sequence(2))
         reqs = scheduler.schedule()
         assert len(reqs) == 2
 
     def test_restricted_by_max_seq_num_twice(self):
         scheduler = make_scheduler(max_num_tokens=1000, max_num_seqs=2)
         for _ in range(100):
-            scheduler.add_request(Sequence([0] * 2))
+            scheduler.add_request(make_sequence(2))
         reqs = scheduler.schedule()
         assert len(reqs) == 2
         reqs = scheduler.schedule()
@@ -86,14 +90,14 @@ class TestSchedule:
     def test_restricted_by_max_token_num(self):
         scheduler = make_scheduler(max_num_tokens=5, max_num_seqs=1000)
         for _ in range(100):
-            scheduler.add_request(Sequence([0] * 2))
+            scheduler.add_request(make_sequence(2))
         reqs = scheduler.schedule()
         assert len(reqs) == 2
 
     def test_restricted_by_max_token_num_multiple_step(self):
         scheduler = make_scheduler(max_num_tokens=5, max_num_seqs=1000)
         for _ in range(3):
-            scheduler.add_request(Sequence([0] * 2))
+            scheduler.add_request(make_sequence(2))
         reqs = scheduler.schedule()
         assert len(reqs) == 2
         reqs = scheduler.schedule()
@@ -101,15 +105,15 @@ class TestSchedule:
 
     def test_restricted_by_block_num(self):
         scheduler = make_scheduler(num_pages=2)
-        scheduler.add_request(Sequence([0] * 32))
-        scheduler.add_request(Sequence([0] * 32))
+        scheduler.add_request(make_sequence(32))
+        scheduler.add_request(make_sequence(32))
         reqs = scheduler.schedule()
         assert len(reqs) == 1
 
     def test_restricted_by_block_num_multiple_step(self):
         scheduler = make_scheduler(num_pages=2)
-        scheduler.add_request(Sequence([0] * 32))
-        scheduler.add_request(Sequence([0] * 32))
+        scheduler.add_request(make_sequence(32))
+        scheduler.add_request(make_sequence(32))
         reqs = scheduler.schedule()
         assert len(reqs) == 1
         reqs[0].token_ids.append(0)
@@ -117,7 +121,7 @@ class TestSchedule:
         assert len(reqs) == 0
 
     def test_schedule_prefill_first(self):
-        seqs = [Sequence([0] * 32) for _ in range(2)]
+        seqs = [make_sequence(32) for _ in range(2)]
 
         def check_seq_finish_func(seq):
             return seq.req_id == seqs[0].req_id
@@ -129,7 +133,7 @@ class TestSchedule:
         assert len(reqs) == 2
         scheduler.post_process(reqs, [0, 0])
         # 此时第一个序列完成，第二个变成 decode
-        seq3 = Sequence([0] * 32)
+        seq3 = make_sequence(32)
         scheduler.add_request(seq3)
         # 混合都有的情况下，优先调度 prefill 序列
         reqs = scheduler.schedule()
@@ -139,7 +143,7 @@ class TestSchedule:
     def test_decode_restricted_by_max_token_num(self):
         scheduler = make_scheduler(max_num_tokens=7, max_num_seqs=1000)
         for _ in range(9):
-            scheduler.add_request(Sequence([0] * 2))
+            scheduler.add_request(make_sequence(2))
         reqs = scheduler.schedule()
         scheduler.post_process(reqs, [0] * len(reqs))
         reqs = scheduler.schedule()
@@ -153,7 +157,7 @@ class TestSchedule:
     def test_decode_restricted_by_max_seq_num(self):
         scheduler = make_scheduler(max_num_tokens=1000, max_num_seqs=5)
         for _ in range(9):
-            scheduler.add_request(Sequence([0] * 2))
+            scheduler.add_request(make_sequence(2))
         reqs = scheduler.schedule()
         scheduler.post_process(reqs, [0] * len(reqs))
         reqs = scheduler.schedule()
@@ -168,12 +172,12 @@ class TestSchedule:
 class TestPostProcess:
     def test_append_token_id(self):
         scheduler = make_scheduler()
-        seqs = [Sequence([0] * 32) for _ in range(100)]
+        seqs = [make_sequence(32) for _ in range(100)]
         scheduler.post_process(seqs, [0] * len(seqs))
         assert len(seqs[0].token_ids) == 33
 
     def test_check_seq_finish_func(self):
-        seqs = [Sequence([0] * 32) for _ in range(100)]
+        seqs = [make_sequence(32) for _ in range(100)]
 
         def check_seq_finish_func(seq):
             return seq.req_id == seqs[0].req_id
@@ -183,7 +187,7 @@ class TestPostProcess:
         assert seqs[0].status == SequenceStatus.FINISHED
 
     def test_check_can_schedule_more_when_finish(self):
-        seqs = [Sequence([0] * 32) for _ in range(2)]
+        seqs = [make_sequence(32) for _ in range(2)]
 
         def check_seq_finish_func(seq):
             return seq.req_id == seqs[0].req_id

@@ -17,6 +17,7 @@ logger = get_logger(__name__)
 @dataclass
 class BatchPerfMetrics:
     """批量请求的汇总性能指标。"""
+
     per_request: list[PerfMetrics]
     num_requests: int
     total_tokens: int
@@ -34,7 +35,9 @@ class SyncEngine:
       - 接口全部同步：generate_stream / generate / batch_generate / warmup。
     """
 
-    def __init__(self, config_path: str, model_name: str, log_interval: int = 0):
+    def __init__(
+        self, config_path: str, model_name: str, log_interval: int = 0
+    ):
         """
         Args:
             config_path: 批处理配置文件路径。
@@ -70,93 +73,98 @@ class SyncEngine:
     def warmup(self, prompt: str = "你好", num_tokens: int = 3):
         """跑一轮快速请求，触发 Triton 内核编译，避免首个请求 TTFT 被污染。"""
         logger.info("开始预热")
-        old_max_tokens = self.config.generation.max_new_tokens
-        self.config.generation.max_new_tokens = num_tokens
-        try:
-            for _ in self.generate_stream(prompt):
-                pass
-        finally:
-            self.config.generation.max_new_tokens = old_max_tokens
+        for _ in self.generate_stream(prompt, num_tokens):
+            pass
         logger.info("预热完成")
 
     def generate_stream(
         self, prompt: str | list[dict], max_new_tokens: int | None = None
     ) -> Iterator[StreamChunk]:
         """同步流式生成，逐 chunk yield（delta + 指标）。"""
-        if max_new_tokens is not None:
-            old = self.config.generation.max_new_tokens
-            self.config.generation.max_new_tokens = max_new_tokens
-            try:
-                for chunk in self._stream_impl(prompt):
-                    yield chunk
-            finally:
-                self.config.generation.max_new_tokens = old
-            return
-        yield from self._stream_impl(prompt)
+        max_new_tokens = (
+            max_new_tokens
+            if max_new_tokens
+            else self.config.generation.max_new_tokens
+        )
+        for chunk in self._stream_impl(prompt, max_new_tokens):
+            yield chunk
 
-    def generate(self, prompt: str | list[dict], max_new_tokens: int | None = None) -> str:
+    def generate(
+        self, prompt: str | list[dict], max_new_tokens: int | None = None
+    ) -> str:
         """非流式生成，返回完整文本。"""
         return "".join(
-            chunk.delta for chunk in self.generate_stream(prompt, max_new_tokens)
+            chunk.delta
+            for chunk in self.generate_stream(prompt, max_new_tokens)
         )
 
     def batch_generate(
-        self, prompts: list[str | list[dict]], max_new_tokens: int | None = None
+        self,
+        prompts: list[str | list[dict]],
+        max_new_tokens: int | None = None,
     ) -> tuple[list[str], BatchPerfMetrics]:
         """整批同步生成：一次性入队多个请求，连续批处理直到全部结束。
 
         返回 (按 prompts 顺序的文本列表, 批量指标)。
         """
-        seqs = [self._make_sequence(p) for p in prompts]
+        max_new_tokens = (
+            max_new_tokens
+            if max_new_tokens
+            else self.config.generation.max_new_tokens
+        )
+        seqs = [self._make_sequence(p, max_new_tokens) for p in prompts]
         request_start = {seq.req_id: time.perf_counter() for seq in seqs}
         first_token_time: dict[str, float] = {}
         metrics: dict[str, PerfMetrics] = {}
         pending = set(seq.req_id for seq in seqs)
 
-        old = self.config.generation.max_new_tokens
-        if max_new_tokens is not None:
-            self.config.generation.max_new_tokens = max_new_tokens
-        try:
-            for seq in seqs:
-                self.driver.add_request(seq)
-            step_count = 0
-            while pending:
-                planned = self.driver.step([])
-                if not planned:
-                    time.sleep(0.001)
+        for seq in seqs:
+            self.driver.add_request(seq)
+        step_count = 0
+        while pending:
+            planned = self.driver.step([])
+            if not planned:
+                time.sleep(0.001)
+                continue
+            step_count += 1
+            now = time.perf_counter()
+            for seq in planned:
+                if seq.req_id not in pending:
                     continue
-                step_count += 1
-                now = time.perf_counter()
-                for seq in planned:
-                    if seq.req_id not in pending:
-                        continue
-                    start = request_start[seq.req_id]
-                    if seq.req_id not in first_token_time and seq.last_token_id != -1:
-                        first_token_time[seq.req_id] = now
-                    if seq.status == SequenceStatus.FINISHED:
-                        token_count = max(seq.generated_lens, 1)
-                        first = first_token_time.get(seq.req_id, now)
-                        totals = seq.generated_lens
-                        metrics[seq.req_id] = PerfMetrics(
-                            ttft=max(first - start, 0.0),
-                            token_count=token_count,
-                            tps=self._compute_tps(
-                                totals, first, now
-                            ),
-                            total_elapsed=now - start,
-                        )
-                        pending.discard(seq.req_id)
-                self._maybe_log_batch_step(step_count, len(pending), len(seqs) - len(pending), seqs, now, request_start)
-        finally:
-            if max_new_tokens is not None:
-                self.config.generation.max_new_tokens = old
+                start = request_start[seq.req_id]
+                if (
+                    seq.req_id not in first_token_time
+                    and seq.last_token_id != -1
+                ):
+                    first_token_time[seq.req_id] = now
+                if seq.status == SequenceStatus.FINISHED:
+                    token_count = max(seq.generated_lens, 1)
+                    first = first_token_time.get(seq.req_id, now)
+                    totals = seq.generated_lens
+                    metrics[seq.req_id] = PerfMetrics(
+                        ttft=max(first - start, 0.0),
+                        token_count=token_count,
+                        tps=self._compute_tps(totals, first, now),
+                        total_elapsed=now - start,
+                    )
+                    pending.discard(seq.req_id)
+            self._maybe_log_batch_step(
+                step_count,
+                len(pending),
+                len(seqs) - len(pending),
+                seqs,
+                now,
+                request_start,
+            )
 
-        texts = [
-            self._decode_tail(seq) for seq in seqs
-        ]
+        texts = [self._decode_tail(seq) for seq in seqs]
         ordered_metrics = [metrics[seq.req_id] for seq in seqs]
         total_tokens = sum(m.token_count for m in ordered_metrics)
-        all_elapsed = max(m.total_elapsed for m in ordered_metrics) if ordered_metrics else 0.0
+        all_elapsed = (
+            max(m.total_elapsed for m in ordered_metrics)
+            if ordered_metrics
+            else 0.0
+        )
         aggregate_tps = total_tokens / all_elapsed if all_elapsed > 0 else 0.0
         batch = BatchPerfMetrics(
             per_request=ordered_metrics,
@@ -169,9 +177,11 @@ class SyncEngine:
 
     # ── 内部 ──────────────────────────────────
 
-    def _stream_impl(self, prompt: str | list[dict]) -> Iterator[StreamChunk]:
+    def _stream_impl(
+        self, prompt: str | list[dict], max_new_tokens: int
+    ) -> Iterator[StreamChunk]:
         """单个请求的生成热循环，驱动共享调度循环直到序列结束。"""
-        seq = self._make_sequence(prompt)
+        seq = self._make_sequence(prompt, max_new_tokens)
         self.driver.add_request(seq)
         start_time = time.perf_counter()
         first_token_time: float | None = None
@@ -200,7 +210,11 @@ class SyncEngine:
                 else:
                     total_elapsed = now - start_time
                     decode_elapsed = now - first_token_time
-                    tps = (token_count - 1) / decode_elapsed if decode_elapsed > 0 else 0.0
+                    tps = (
+                        (token_count - 1) / decode_elapsed
+                        if decode_elapsed > 0
+                        else 0.0
+                    )
                     metrics = PerfMetrics(
                         ttft=first_token_time - start_time,
                         token_count=token_count,
@@ -208,16 +222,20 @@ class SyncEngine:
                         total_elapsed=total_elapsed,
                     )
                 self._maybe_log_step(token_count, metrics)
-                delta = self.tokenizer.decode([s.last_token_id], skip_special_tokens=True)
+                delta = self.tokenizer.decode(
+                    [s.last_token_id], skip_special_tokens=True
+                )
                 yield StreamChunk(delta=delta, metrics=metrics)
                 if s.status == SequenceStatus.FINISHED:
                     return
 
-    def _make_sequence(self, prompt: str | list[dict]) -> Sequence:
+    def _make_sequence(
+        self, prompt: str | list[dict], max_new_tokens: int
+    ) -> Sequence:
         """prompt → Sequence，str/list 走 chat template 处理。"""
         text = self._prompt_to_text(prompt)
         token_ids = self.tokenizer(text)
-        return Sequence(token_ids.input_ids)
+        return Sequence(token_ids.input_ids, max_new_tokens=max_new_tokens)
 
     def _prompt_to_text(self, prompt: str | list[dict]) -> str:
         if isinstance(prompt, str):
@@ -227,13 +245,15 @@ class SyncEngine:
         )
 
     @staticmethod
-    def _compute_tps(token_count: int, first_token_time: float, now: float) -> float:
+    def _compute_tps(
+        token_count: int, first_token_time: float, now: float
+    ) -> float:
         delta = now - first_token_time
         return (token_count - 1) / delta if delta > 0 else 0.0
 
     def _decode_tail(self, seq: Sequence) -> str:
         """解码生成的部分 token_ids（剔除 prompt）。"""
-        tail = seq.token_ids[len(seq.prompts):]
+        tail = seq.token_ids[len(seq.prompts) :]
         if not tail:
             tail = [seq.last_token_id]
         return self.tokenizer.decode(tail, skip_special_tokens=True)
@@ -244,9 +264,7 @@ class SyncEngine:
             eos_hit = seq.last_token_id == eos_ids
         else:
             eos_hit = seq.last_token_id in eos_ids
-        return eos_hit or (
-            seq.generated_lens >= self.config.generation.max_new_tokens
-        )
+        return eos_hit or (seq.generated_lens >= seq.max_new_tokens)
 
     # ── 统计日志 ────────────────────────────────
 
@@ -258,7 +276,11 @@ class SyncEngine:
             return
         logger.info(
             "[stream] step=%d  TTFT=%.4fs  tokens=%d  TPS=%.2f  elapsed=%.4fs",
-            token_count, metrics.ttft, metrics.token_count, metrics.tps, metrics.total_elapsed,
+            token_count,
+            metrics.ttft,
+            metrics.token_count,
+            metrics.tps,
+            metrics.total_elapsed,
         )
 
     def _maybe_log_batch_step(
@@ -281,5 +303,10 @@ class SyncEngine:
         aggregate_tps = total_tokens_so_far / elapsed if elapsed > 0 else 0.0
         logger.info(
             "[batch] step=%d  pending=%d  completed=%d  total_tokens=%d  aggregate_tps=%.2f  elapsed=%.4fs",
-            step_count, pending, completed, total_tokens_so_far, aggregate_tps, elapsed,
+            step_count,
+            pending,
+            completed,
+            total_tokens_so_far,
+            aggregate_tps,
+            elapsed,
         )

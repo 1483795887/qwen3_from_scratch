@@ -3,7 +3,7 @@ from qwen3_from_scratch.inference.sequence import Sequence
 
 
 def make_seq(prompt_len: int = 16) -> Sequence:
-    return Sequence([0] * prompt_len)
+    return Sequence([0] * prompt_len, max_new_tokens=10)
 
 
 class TestCanAllocate:

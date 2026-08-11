@@ -10,7 +10,12 @@ class SequenceStatus(enum.Enum):
 
 
 class Sequence:
-    def __init__(self, prompts: list[int], req_id: str | None = None):
+    def __init__(
+        self,
+        prompts: list[int],
+        max_new_tokens: int,
+        req_id: str | None = None,
+    ):
         if req_id is None:
             req_id = str(uuid4())
         self.req_id = req_id
@@ -21,6 +26,7 @@ class Sequence:
         self.block_tables: list[int] = []
         self.status = SequenceStatus.WAITING
         self.is_prefill = True
+        self.max_new_tokens = max_new_tokens
 
     def __len__(self):
         return len(self.token_ids)
