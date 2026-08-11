@@ -1145,6 +1145,10 @@ def test_update_var_len_skips_invalid_slots(model_config, device):
     kv_cache = _make_paged_cache(
         model_config, num_pages, block_size, layer_idx, device
     )
+    # 用确定性哨兵值填充, 避免 torch.empty 未初始化内存含 NaN
+    # 导致 torch.equal 返回 False (IEEE 754: NaN != NaN)
+    kv_cache.k_cache[layer_idx].fill_(-7.0)
+    kv_cache.v_cache[layer_idx].fill_(-7.0)
     ref_k, ref_v = _scatter_reference(
         kv_cache, k_shd, v_shd, slot_mapping, layer_idx, block_size
     )

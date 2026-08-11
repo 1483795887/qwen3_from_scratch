@@ -58,18 +58,21 @@ class TestCanAppend:
         bm = BlockManager(num_blocks=10, block_size=16)
         seq = make_seq(prompt_len=16)
         bm.allocate(seq)  # 占 1 页，剩 9 页
+        seq.token_ids.append(0)
         assert bm.can_append(seq)
 
     def test_true_when_no_need_allocate_new_page(self):
         bm = BlockManager(num_blocks=2, block_size=16)
         seq = make_seq(17)
         bm.allocate(seq)
+        seq.token_ids.append(0)
         assert bm.can_append(seq)
 
     def test_false_when_no_free_pages_available(self):
         bm = BlockManager(num_blocks=2, block_size=16)
         seq = make_seq(32)
         bm.allocate(seq)
+        seq.token_ids.append(0)
         assert not bm.can_append(seq)
 
 
@@ -79,6 +82,7 @@ class TestAppendBlock:
         bm = BlockManager(num_blocks=10, block_size=16)
         seq = make_seq(prompt_len=16)
         bm.allocate(seq)
+        seq.token_ids.append(0)
         before = len(seq.block_tables)
         bm.append_block(seq)
         assert len(seq.block_tables) == before + 1
@@ -90,6 +94,8 @@ class TestAppendBlock:
         seq2 = make_seq(16)
         bm.allocate(seq)
         bm.allocate(seq2)
+        seq.token_ids.append(0)
+        seq2.token_ids.append(0)
         assert bm.can_append(seq)
         bm.append_block(seq)
         assert not bm.can_append(seq2)
@@ -111,6 +117,7 @@ class TestDeallocate:
         bm = BlockManager(num_blocks=1, block_size=16)
         seq = make_seq(prompt_len=16)
         bm.allocate(seq)
+        seq.token_ids.append(0)
         assert bm.can_append(seq) is False
         bm.deallocate(seq)
         assert bm.can_append(seq) is True

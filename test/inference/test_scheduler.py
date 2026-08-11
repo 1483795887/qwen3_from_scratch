@@ -112,6 +112,7 @@ class TestSchedule:
         scheduler.add_request(Sequence([0] * 32))
         reqs = scheduler.schedule()
         assert len(reqs) == 1
+        reqs[0].token_ids.append(0)
         reqs = scheduler.schedule()
         assert len(reqs) == 0
 

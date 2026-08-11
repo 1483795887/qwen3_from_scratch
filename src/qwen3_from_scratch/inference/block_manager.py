@@ -31,7 +31,7 @@ class BlockManager:
 
     def can_append(self, seq: Sequence) -> bool:
         # decode 时使用，追加一个词元能否申请一个新块，如果不需要申请，也算能够申请
-        if (len(seq) + 1) % self.block_size != 1:
+        if len(seq) % self.block_size != 1:
             return True
         return len(self.free_blocks) > 0
 
