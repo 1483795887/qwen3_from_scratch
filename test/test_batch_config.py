@@ -465,6 +465,41 @@ models:
         assert resolved.generation.temperature == 0.5
         assert resolved.generation.max_new_tokens == 999
 
+    def test_scheduler_defaults_when_no_block(self, tmp_path):
+        """无 scheduler 块 → 用 SchedulerDefaults 内置默认值。"""
+        p = _make_fake_model_dir(tmp_path)
+        yaml_path = _write_yaml(
+            tmp_path,
+            f"""
+models:
+  - name: "m1"
+    path: "{p}"
+    max_len: 2048
+""",
+        )
+        config = load_batch_config(yaml_path)
+        assert config.scheduler.enable_prefix_cache is True
+        assert config.scheduler.chunked_prefill_size == 512
+
+    def test_scheduler_custom_values_parsed(self, tmp_path):
+        """自定义 scheduler 块 → 分段/前缀缓存参数正确解析。"""
+        p = _make_fake_model_dir(tmp_path)
+        yaml_path = _write_yaml(
+            tmp_path,
+            f"""
+scheduler:
+  enable_prefix_cache: false
+  chunked_prefill_size: 128
+models:
+  - name: "m1"
+    path: "{p}"
+    max_len: 2048
+""",
+        )
+        config = load_batch_config(yaml_path)
+        assert config.scheduler.enable_prefix_cache is False
+        assert config.scheduler.chunked_prefill_size == 128
+
 
 # ── 集成测试（依赖真实模型）──────────────────
 

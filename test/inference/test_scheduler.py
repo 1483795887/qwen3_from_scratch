@@ -14,12 +14,14 @@ def make_scheduler(
     max_num_seqs: int = 8,
     max_num_tokens=100,
     check_seq_finish_func: Callable[[Sequence], bool] = lambda seq: False,
+    enable_prefix_cache: bool = False,
 ) -> Scheduler:
     config = SchedulerConfig(
         max_num_seqs=max_num_seqs,
         max_num_tokens=max_num_tokens,
         block_size=block_size,
         max_blocks=num_pages,
+        enable_prefix_cache=enable_prefix_cache,
     )
     return Scheduler(config, check_seq_finish_func)
 
@@ -41,10 +43,11 @@ class TestAddRequest:
         assert len(scheduler.active) == 0
         assert len(scheduler.waiting) == 1
 
-    def test_return_false_when_prompts_more_than_max_num_tokens(self):
+    def test_accepts_prompt_longer_than_max_num_tokens(self):
+        # 分段 prefill 后，超长 prompt 可分片处理，不再被拒绝
         scheduler = make_scheduler(max_num_tokens=100)
         seq = make_sequence(101)
-        assert not scheduler.add_request(seq)
+        assert scheduler.add_request(seq)
 
     def test_return_false_when_prompts_and_max_new_tokens_more_than_max_tokens(
         self,
@@ -100,22 +103,25 @@ class TestSchedule:
         assert len(reqs) == 2
 
     def test_restricted_by_max_token_num(self):
+        # 分段 prefill 会把剩余额度用部分 chunk 填满：2 + 2 + 1 = 5
         scheduler = make_scheduler(max_num_tokens=5, max_num_seqs=1000)
         for _ in range(100):
             scheduler.add_request(make_sequence(2))
         reqs = scheduler.schedule()
-        assert len(reqs) == 2
+        assert len(reqs) == 3
 
-    def test_restricted_by_max_token_num_multiple_step(self):
-        scheduler = make_scheduler(max_num_tokens=5, max_num_seqs=1000)
-        for _ in range(3):
-            scheduler.add_request(make_sequence(2))
-        reqs = scheduler.schedule()
-        assert len(reqs) == 2
+    def test_chunked_prefill_splits_long_prompt_across_steps(self):
+        scheduler = make_scheduler(max_num_tokens=3, max_num_seqs=1000)
+        scheduler.add_request(make_sequence(5))
         reqs = scheduler.schedule()
         assert len(reqs) == 1
+        assert reqs[0].num_tokens == 3  # 第一段填满额度
+        scheduler.post_process(reqs, [0])
+        reqs = scheduler.schedule()
+        assert len(reqs) == 1
+        assert reqs[0].num_tokens == 2  # 第二段剩余 2 token
 
-    def test_schedule_prefill_first(self):
+    def test_schedule_decode_first(self):
         seqs = [make_sequence(32) for _ in range(2)]
 
         def check_seq_finish_func(seq):
@@ -130,10 +136,27 @@ class TestSchedule:
         # 此时第一个序列完成，第二个变成 decode
         seq3 = make_sequence(32)
         scheduler.add_request(seq3)
-        # 混合都有的情况下，优先调度 prefill 序列
+        # 混合都有的情况下，解码优先：seqs[1] decode 在前，seq3 prefill 补位
         reqs = scheduler.schedule()
-        assert len(reqs) == 1
-        assert reqs[0].req_id == seq3.req_id
+        assert reqs[0].req_id == seqs[1].req_id
+        assert not reqs[0].is_prefill
+        assert reqs[1].req_id == seq3.req_id
+        assert reqs[1].is_prefill
+
+    def test_prefix_cache_seeds_cached_len(self):
+        scheduler = make_scheduler(enable_prefix_cache=True)
+        prompt = list(range(32))
+        seq_a = Sequence(prompt, max_new_tokens=10)
+        scheduler.add_request(seq_a)
+        reqs = scheduler.schedule()
+        scheduler.post_process(reqs, [0])  # seq_a 完成 prefill，块已注册
+
+        seq_b = Sequence(prompt + [100, 101], max_new_tokens=10)
+        scheduler.add_request(seq_b)
+        scheduler.schedule()
+        # seq_b 共享 seq_a 的前 2 块，cached_len 被 seed 到 32
+        assert seq_b.cached_len == 32
+        assert seq_b.block_tables[:2] == seq_a.block_tables[:2]
 
     def test_decode_restricted_by_max_token_num(self):
         scheduler = make_scheduler(max_num_tokens=7, max_num_seqs=1000)
@@ -168,6 +191,8 @@ class TestPostProcess:
     def test_append_token_id(self):
         scheduler = make_scheduler()
         seqs = [make_sequence(32) for _ in range(100)]
+        for seq in seqs:
+            seq.num_tokens = 32  # 模拟整段 prefill
         scheduler.post_process(seqs, [0] * len(seqs))
         assert len(seqs[0].token_ids) == 33
 
@@ -178,6 +203,8 @@ class TestPostProcess:
             return seq.req_id == seqs[0].req_id
 
         scheduler = make_scheduler(check_seq_finish_func=check_seq_finish_func)
+        for seq in seqs:
+            seq.num_tokens = 32
         scheduler.post_process(seqs, [0] * len(seqs))
         assert seqs[0].status == SequenceStatus.FINISHED
 

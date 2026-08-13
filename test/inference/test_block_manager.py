@@ -10,132 +10,88 @@ class TestCanAllocate:
     def test_true_when_enough_free_pages(self):
         bm = BlockManager(num_blocks=10, block_size=16)
         seq = make_seq(16)
-        assert bm.can_allocate(seq)
+        assert bm.can_allocate(seq, 16)
 
     def test_false_when_insufficient_free_pages(self):
         bm = BlockManager(num_blocks=2, block_size=16)
         seq = make_seq(33)
-        assert not bm.can_allocate(seq)
+        assert not bm.can_allocate(seq, 33)
+
+    def test_true_when_num_tokens_stay_within_existing_blocks(self):
+        # 新增 token 仍在已分配块内，无需新块 → 恒可分配
+        bm = BlockManager(num_blocks=2, block_size=16)
+        seq = make_seq(16)
+        bm.allocate(seq, 16)
+        seq.cached_len = 16
+        assert bm.can_allocate(seq, 1)
+
+    def test_false_when_boundary_cross_needs_block_but_pool_empty(self):
+        bm = BlockManager(num_blocks=2, block_size=16)
+        seq = make_seq(32)
+        bm.allocate(seq, 16)
+        seq.cached_len = 16
+        bm.allocate(seq, 16)  # 占满 2 块
+        seq.cached_len = 32
+        assert not bm.can_allocate(seq, 1)
 
 
 class TestAllocate:
-    def test_writes_page_ids_to_seq_block_tables(self):
+    def test_allocates_exact_blocks_for_num_tokens(self):
         bm = BlockManager(num_blocks=10, block_size=16)
-        seq = make_seq(prompt_len=32)
-        bm.allocate(seq)
+        seq = make_seq(32)
+        bm.allocate(seq, 32)
         assert len(seq.block_tables) == 2
         assert all(isinstance(pid, int) for pid in seq.block_tables)
 
-    def test_reflects_current_free_pool_after_allocation(self):
-        """已分配页面后，can_allocate 反映剩余空闲页。"""
-        bm = BlockManager(num_blocks=3, block_size=16)
-        seq1 = make_seq(prompt_len=31)  # 占 2 页
-        bm.allocate(seq1)
-        seq2 = make_seq(prompt_len=16)  # 需 1 页
-        # 剩余 1 页，恰好够 1 页
-        assert bm.can_allocate(seq2)
-
-    def test_can_allocate_return_false_after_pool_exhausted(self):
-        """空闲页耗尽后 can_allocate 返回 False。"""
-        bm = BlockManager(num_blocks=2, block_size=16)
-        seq1 = make_seq(prompt_len=32)
-        bm.allocate(seq1)  # 占满 2 页
-        seq2 = make_seq(prompt_len=16)
-        assert not bm.can_allocate(seq2)
-
-    def test_multiple_sequences_get_disjoint_pages(self):
-        """多个 seq 分配的页面 ID 不重叠。"""
+    def test_allocate_incrementally_appends_only_missing_blocks(self):
         bm = BlockManager(num_blocks=10, block_size=16)
-        seq1 = make_seq(prompt_len=32)
-        seq2 = make_seq(prompt_len=16)
-        bm.allocate(seq1)
-        bm.allocate(seq2)
-        assert set(seq1.block_tables).isdisjoint(set(seq2.block_tables))
-
-
-class TestCanAppend:
-    def test_true_when_free_pages_available(self):
-        bm = BlockManager(num_blocks=10, block_size=16)
-        seq = make_seq(prompt_len=16)
-        bm.allocate(seq)  # 占 1 页，剩 9 页
-        seq.token_ids.append(0)
-        assert bm.can_append(seq)
-
-    def test_true_when_no_need_allocate_new_page(self):
-        bm = BlockManager(num_blocks=2, block_size=16)
-        seq = make_seq(17)
-        bm.allocate(seq)
-        seq.token_ids.append(0)
-        assert bm.can_append(seq)
-
-    def test_false_when_no_free_pages_available(self):
-        bm = BlockManager(num_blocks=2, block_size=16)
         seq = make_seq(32)
-        bm.allocate(seq)
-        seq.token_ids.append(0)
-        assert not bm.can_append(seq)
+        bm.allocate(seq, 16)  # 第一段 prefill 16 token
+        assert len(seq.block_tables) == 1
+        seq.cached_len = 16  # 模拟 post_process 写入后
+        bm.allocate(seq, 16)  # 第二段 prefill 16 token
+        assert len(seq.block_tables) == 2
 
-
-class TestAppendBlock:
-    def test_appends_one_page_to_block_tables(self):
-        """追加后 block_tables 长度 +1。"""
+    def test_allocate_appends_block_on_decode_boundary_cross(self):
         bm = BlockManager(num_blocks=10, block_size=16)
-        seq = make_seq(prompt_len=16)
-        bm.allocate(seq)
-        seq.token_ids.append(0)
-        before = len(seq.block_tables)
-        bm.append_block(seq)
-        assert len(seq.block_tables) == before + 1
+        seq = make_seq(16)
+        bm.allocate(seq, 16)
+        seq.cached_len = 16
+        bm.allocate(seq, 1)  # decode 1 token，跨块 → 追加第 2 块
+        assert len(seq.block_tables) == 2
 
-    def test_reflects_state_after_append(self):
-        """append_block 占用最后一页后 can_append 变 False。"""
-        bm = BlockManager(num_blocks=3, block_size=16)
-        seq = make_seq(prompt_len=16)
-        seq2 = make_seq(16)
-        bm.allocate(seq)
-        bm.allocate(seq2)
-        seq.token_ids.append(0)
-        seq2.token_ids.append(0)
-        assert bm.can_append(seq)
-        bm.append_block(seq)
-        assert not bm.can_append(seq2)
+    def test_allocate_noop_when_within_existing_blocks(self):
+        bm = BlockManager(num_blocks=10, block_size=16)
+        seq = make_seq(16)
+        bm.allocate(seq, 16)
+        before = list(seq.block_tables)
+        seq.cached_len = 15  # 还有 1 token 空间
+        bm.allocate(seq, 1)  # 15+1=16，仍在第 1 块内
+        assert seq.block_tables == before
 
 
 class TestDeallocate:
-    def test_returns_all_pages_to_free_pool(self):
-        """释放后所有原页面回到 free_blocks。"""
+    def test_returns_all_blocks_to_free_pool(self):
         bm = BlockManager(num_blocks=10, block_size=16)
-        seq = make_seq(prompt_len=32)
-        bm.allocate(seq)
+        seq = make_seq(32)
+        bm.allocate(seq, 32)
         allocated = list(seq.block_tables)
         bm.deallocate(seq)
         for pid in allocated:
             assert pid in bm.free_blocks
 
-    def test_reflects_state_after_free(self):
-        """free 回收页面后 can_append 变 True。"""
-        bm = BlockManager(num_blocks=1, block_size=16)
-        seq = make_seq(prompt_len=16)
-        bm.allocate(seq)
-        seq.token_ids.append(0)
-        assert bm.can_append(seq) is False
-        bm.deallocate(seq)
-        assert bm.can_append(seq) is True
-
     def test_clears_seq_block_tables(self):
-        """释放后 seq.block_tables 被清空。"""
         bm = BlockManager(num_blocks=10, block_size=16)
-        seq = make_seq(prompt_len=32)
-        bm.allocate(seq)
+        seq = make_seq(32)
+        bm.allocate(seq, 32)
         bm.deallocate(seq)
         assert seq.block_tables == []
 
-    def test_freed_pages_reusable_by_new_sequence(self):
-        """释放的页面可被新 seq 重新分配。"""
+    def test_freed_blocks_reusable_by_new_sequence(self):
         bm = BlockManager(num_blocks=2, block_size=16)
-        seq_a = make_seq(prompt_len=32)  # 占满 2 页
-        bm.allocate(seq_a)
+        seq_a = make_seq(32)
+        bm.allocate(seq_a, 32)
         bm.deallocate(seq_a)
-        seq_b = make_seq(prompt_len=32)  # 再分配 2 页
-        bm.allocate(seq_b)
+        seq_b = make_seq(32)
+        bm.allocate(seq_b, 32)
         assert len(seq_b.block_tables) == 2

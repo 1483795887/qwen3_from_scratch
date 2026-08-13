@@ -12,8 +12,8 @@ from qwen3_from_scratch.inference.logger import get_logger
 from qwen3_from_scratch.inference.model_manager import ModelManager
 from qwen3_from_scratch.inference.model_worker import ModelWorker
 from qwen3_from_scratch.inference.scheduler import Scheduler, SchedulerConfig
-from qwen3_from_scratch.inference.sequence import Sequence, SequenceStatus
 from qwen3_from_scratch.inference.scheduler_driver import SchedulerDriver
+from qwen3_from_scratch.inference.sequence import Sequence, SequenceStatus
 
 logger = get_logger(__name__)
 
@@ -147,6 +147,8 @@ class LLMEngine:
                 self.config.scheduler.max_num_tokens,
                 self.config.scheduler.block_size,
                 blocks,
+                enable_prefix_cache=self.config.scheduler.enable_prefix_cache,
+                chunked_prefill_size=self.config.scheduler.chunked_prefill_size,
             ),
             check_seq_finish_func=self._check_seq_finish,
         )
