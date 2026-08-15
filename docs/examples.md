@@ -14,6 +14,14 @@
 | [qwen3_quant_study.py](../examples/qwen3_quant_study.py) | Qwen3 量化研究脚本 |
 | [train/](../examples/train/) | 训练相关示例：数据集转换（`convert_to_jsonl.py`）与训练脚本（`train.py`） |
 
+## 训练示例依赖
+
+`examples/train/` 使用 `datasets`（HuggingFace 数据集库），它不属于项目主体依赖，需要自行安装：
+
+```bash
+uv pip install datasets
+```
+
 ## OpenAI 兼容服务器
 
 `examples/server.py` 基于 FastAPI 提供一个 OpenAI 兼容的 HTTP 服务，支持流式对话（`/v1/chat/completions`）与模型列表查询。
