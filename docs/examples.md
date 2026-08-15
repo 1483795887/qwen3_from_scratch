@@ -44,6 +44,10 @@ uv run examples/server.py --config_path examples/configs/batch2_example.yaml --m
 uv run examples/server.py --config_path examples/configs/batch2_example.yaml --model qwen3-0.6b --use_real_model
 ```
 
+效果展示
+
+![server](../pics/openai_server.png)
+
 ## 模型路径配置
 
 不同示例的模型来源：
