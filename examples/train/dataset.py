@@ -1,3 +1,7 @@
+"""
+需要执行
+uv pip install datasets
+"""
 import torch
 from datasets import load_dataset
 from torch.utils.data import Dataset

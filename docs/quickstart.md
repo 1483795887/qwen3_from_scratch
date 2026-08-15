@@ -29,6 +29,7 @@ cp .env.example .env
 ![pics](../pics/basic_generation.png)
 
 - [examples/llm_runner.py](../examples/llm_runner.py)，基于 `LLMEngine` 的推理引擎示例，支持流式生成与多模型批量配置
+- [examples/server.py](../examples/server.py)，OpenAI 兼容 API 服务器，详见 [使用样本](examples.md)
 
 更多示例见 [使用样本](examples.md)。
 

@@ -45,3 +45,5 @@ qwen3_from_scratch/
 - [transformers库](https://github.com/huggingface/transformers)
 - [llama.cpp](https://github.com/ggml-org/llama.cpp)
 - [Qwen3](https://huggingface.co/Qwen/Qwen3-0.6B)
+- [nano-vllm](https://github.com/GeeeekExplorer/nano-vllm)
+- [minimind](https://github.com/jingyaogong/minimind)
