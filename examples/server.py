@@ -130,7 +130,8 @@ def create_app(config_path: str, mode_name: str, use_real_model: bool):
         )
 
     def list_models() -> list[str]:
-        return app.state.engine.config.list_model_names()
+        return [args.model]
+
 
     router = create_openai_router(
         list_models=list_models, run_completion=completions
