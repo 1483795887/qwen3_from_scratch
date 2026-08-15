@@ -10,8 +10,31 @@
 | [run_minimind.py](../examples/run_minimind.py) | 运行 minimind-3-moe 小模型，需要设置环境变量 `MINIMIND_MODEL_PATH` |
 | [sync_engine_example.py](../examples/sync_engine_example.py) | `SyncEngine` 同步推理引擎示例，单请求流式生成并打印性能指标 |
 | [benchmark.py](../examples/benchmark.py) | 性能基准测试，对 `BatchRunner` 做 warmup 后测速 |
+| [server.py](../examples/server.py) | OpenAI 兼容 API 服务器，基于 FastAPI，支持流式对话与模型列表，详见下方章节 |
 | [qwen3_quant_study.py](../examples/qwen3_quant_study.py) | Qwen3 量化研究脚本 |
 | [train/](../examples/train/) | 训练相关示例：数据集转换（`convert_to_jsonl.py`）与训练脚本（`train.py`） |
+
+## OpenAI 兼容服务器
+
+`examples/server.py` 基于 FastAPI 提供一个 OpenAI 兼容的 HTTP 服务，支持流式对话（`/v1/chat/completions`）与模型列表查询。
+
+先安装依赖：
+
+```bash
+uv pip install fastapi fastapi-openai-compat uvicorn
+```
+
+启动（先改好 `examples/configs/batch2_example.yaml` 中的模型路径）：
+
+```bash
+uv run examples/server.py --config_path examples/configs/batch2_example.yaml --model qwen3-0.6b
+```
+
+默认监听 `0.0.0.0:8889`。默认使用 `FakeEngine`（返回固定的 "hello world"），用于在无模型环境下验证服务链路；加上 `--use_real_model` 后改用真实的 `LLMEngine` 推理：
+
+```bash
+uv run examples/server.py --config_path examples/configs/batch2_example.yaml --model qwen3-0.6b --use_real_model
+```
 
 ## 模型路径配置
 
