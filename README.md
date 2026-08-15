@@ -1,19 +1,24 @@
 # Qwen3 From Scratch
 
-## 概述
-一个从零开始实现的Qwen3大语言模型，包含手写CUDA算子、性能优化和完整推理流程。
+一个从零开始实现的 Qwen3 大语言模型，包含手写 CUDA 算子、性能优化和完整推理流程。
+
+## 文档导航
+
+- [📖 技术博客](docs/blog.md) — 从零开始写 Qwen3 系列文章
+- [🚀 启动指南](docs/quickstart.md) — 编译、配置与运行
+- [🧪 使用样本](docs/examples.md) — 示例程序说明
 
 ## 技术实现
 
 ### 模型架构
-- 完整实现Qwen3模型：Embedding、Attention、MLP、RMS Norm
-- 支持加载HuggingFace官方预训练权重
-- 模块化设计：通过ComponentFactory切换不同实现
+- 完整实现 Qwen3 模型：Embedding、Attention、MLP、RMS Norm
+- 支持加载 HuggingFace 官方预训练权重
+- 模块化设计：通过 ComponentFactory 切换不同实现
 
-### CUDA算子优化
-- **RMS Norm融合算子**：融合归一化+缩放+偏置，减少显存访问
-- **KV Cache优化**：优化自回归推理的显存占用和速度
-- **更多算子开发中**：Flash Attention (Triton)、Rotary Embedding等
+### CUDA 算子优化
+- **RMS Norm 融合算子**：融合归一化+缩放+偏置，减少显存访问
+- **KV Cache 优化**：优化自回归推理的显存占用和速度
+- **更多算子开发中**：Flash Attention (Triton)、Rotary Embedding 等
 
 ### 项目结构
 ```
@@ -36,66 +41,7 @@ qwen3_from_scratch/
 
 每个测试会对不同组件、cpu和cuda都运行，如果不支持cuda会自动跳过
 
-## 编译
-本项目分为python代码和C++/Cuda算子代码，前者通过uv控制，后者通过cmake控制
-
-首先使用 `uv sync` 安装依赖并生成虚拟环境，至少需要 `torch` 库，然后使用 `uv pip install -e .`安装python项目，这样才能使用 `from qwen3_from_scratch` 引用代码
-
-安装完依赖后使用 `cmake -B build` 进行 cmake 配置，它会使用 uv 获取 torch、python 等库的安装路径，然后使用 `cmake --build build`启动编译，编译完成后会在 `src/qwen3_from_scratch/kernels` 下生成一个 ops 的动态链接库的软链接，直接使用 `from qwen3_from_scratch.kernels import ops` 即可导入使用
-
-Cmake项目可选CUDA，但算子主要还是写的CUDA，cpu版本就验证准确性，如果没有CUDA，cmake会只编译cpu版的算子
-
-## 启动
-需要自己从Hugging Face或者魔搭上下载Qwen3的模型，复制 `.env.example` 为 `.env`，设置Qwen3模型的路径
-
-启动入口主要有三个：
-- test 下的测试用例，使用 `uv run pytest` 可以启动
-- examples/basic_generation.py，一个简单的模型推理例子，可以修改提示词查看模型整体的运行情况，例子如下
-
-![pics](pics/basic_generation.png)
-- examples/llm_runner.py，基于 `LLMEngine` 的推理引擎示例，支持流式生成与多模型批量配置
-
-### llm_runner 使用
-
-`examples/llm_runner.py` 通过 `LLMEngine` 驱动一个后台推理进程完成生成，调用方以流式方式接收结果：
-
-```python
-from qwen3_from_scratch.inference.llm_engine import LLMEngine
-import asyncio
-from pathlib import Path
-
-async def main():
-    engine = LLMEngine(Path("examples/configs/batch2_example.yaml"), "qwen3-0.6b")
-    async for delta in engine.generate_stream([{"role": "user", "content": "介绍一下自己"}]):
-        print(delta, end='')
-    engine.close()
-
-if __name__ == '__main__':
-    asyncio.run(main())
-```
-
-运行前先将 `examples/configs/batch2_example.yaml` 中的 `path` 改成你自己的模型下载路径（也可参考其中的多模型配置方法），然后执行：
-
-```bash
-uv run examples/llm_runner.py
-```
-
-要点说明：
-- `generate_stream` 接收 OpenAI 风格的消息列表，内部会经 `apply_chat_template` 转换为模型输入
-- 多模型通过配置文件的 `models` 列表声明，每个模型可单独指定 `device`、`dtype`、`components` 与 `generation` 覆盖项
-- 使用完毕后调用 `engine.close()` 结束后台推理进程
-
-# 技术博客
-- [从零开始写Qwen3（一）模型结构分析](https://blog.csdn.net/qq_43491590/article/details/158810975?spm=1011.2415.3001.5331)
-- [从零开始写Qwen3（二）快速搭建Qwen3](https://blog.csdn.net/qq_43491590/article/details/158836521?spm=1011.2415.3001.5331)
-- [从零开始写Qwen3（三）-KVCache](https://blog.csdn.net/qq_43491590/article/details/158878111?spm=1011.2415.3001.5331)
-- [从零开始写Qwen3 (四）实现RMSNorm算子 ](https://blog.csdn.net/qq_43491590/article/details/158886858)
-- [从零开始写Qwen3（四-其二）使用Triton实现RMSNorm算子](https://blog.csdn.net/qq_43491590/article/details/160286002)
-- [从零开始写Qwen3（五-其一）使用Triton实现自注意力](https://blog.csdn.net/qq_43491590/article/details/160508208?spm=1011.2415.3001.5331)
-- [从零开始写Qwen3（五-其二）使用Triton实现FlashAttention](https://blog.csdn.net/qq_43491590/article/details/160601892)
-- [从零开始写Qwen3（五-其三）FlashAttention提速](https://blog.csdn.net/qq_43491590/article/details/160860070)
-- [从零开始写Qwen3（五-其四）FlashAttention 差异汇编分析](https://blog.csdn.net/qq_43491590/article/details/160861472)
-# 引用
+## 引用
 - [transformers库](https://github.com/huggingface/transformers)
 - [llama.cpp](https://github.com/ggml-org/llama.cpp)
 - [Qwen3](https://huggingface.co/Qwen/Qwen3-0.6B)
