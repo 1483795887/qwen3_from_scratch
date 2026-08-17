@@ -1,3 +1,5 @@
+# uv pip install openai
+
 import asyncio
 from openai import AsyncOpenAI
 from openai.types.chat import ChatCompletionChunk
