@@ -191,13 +191,36 @@ class LLMEngine:
         self.request_queue.put([])
 
     async def generate_stream(
-        self, prompt: str | list[dict], max_new_tokens: int | None = None
+        self,
+        prompt: str | list[dict],
+        max_new_tokens: int | None = None,
+        tools: list[dict] | None = None,
+        tool_choice: str | dict | None = None,
+        enable_thinking: bool | None = None,
     ) -> AsyncIterator[StreamChunk]:
-        """异步流式生成，yield StreamChunk（解码文本 + 性能指标）。"""
+        """异步流式生成，yield StreamChunk（解码文本 + 性能指标）。
+
+        当 ``prompt`` 为 OpenAI 风格消息列表时，内部会经
+        ``tokenizer.apply_chat_template`` 渲染为模型输入；``tools`` /
+        ``tool_choice`` / ``enable_thinking`` 仅在此情况下生效，会透传给
+        chat template（Qwen3 模板据此注入工具声明与思维模式）。
+
+        注意：Qwen3 的工具调用/思维标记（``...``、``...``）
+        在词表中被标记为 ``special=false``，因此即使解码时
+        ``skip_special_tokens=True`` 也会保留在输出文本中，调用方可在流式
+        文本里解析出工具调用。
+        """
         queue: asyncio.Queue[RequestResult] = asyncio.Queue()
         if isinstance(prompt, list):
+            template_kwargs: dict = {"add_generation_prompt": True}
+            if tools is not None:
+                template_kwargs["tools"] = tools
+            if tool_choice is not None:
+                template_kwargs["tool_choice"] = tool_choice
+            if enable_thinking is not None:
+                template_kwargs["enable_thinking"] = enable_thinking
             prompt = self.tokenizer.apply_chat_template(
-                prompt, tokenize=False, add_generation_prompt=True
+                prompt, tokenize=False, **template_kwargs
             )
         request = Request(
             prompt,
