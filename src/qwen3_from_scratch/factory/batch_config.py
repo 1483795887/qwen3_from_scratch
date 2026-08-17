@@ -144,6 +144,8 @@ class SchedulerDefaults:
     max_num_tokens: int = 3000
     block_size: int = 16
     gpu_utilization: float = 0.5
+    enable_prefix_cache: bool = True
+    chunked_prefill_size: int = 512
 
 
 # ── 顶层配置 ──────────────────────────────────
@@ -265,6 +267,8 @@ def load_batch_config(config_path: str) -> BatchConfig:
         max_num_tokens=scheduler_raw.get("max_num_tokens", 3000),
         block_size=scheduler_raw.get("block_size", 16),
         gpu_utilization=scheduler_raw.get("gpu_utilization", 0.5),
+        enable_prefix_cache=scheduler_raw.get("enable_prefix_cache", True),
+        chunked_prefill_size=scheduler_raw.get("chunked_prefill_size", 512),
     )
 
     # 解析 KVCache dtype

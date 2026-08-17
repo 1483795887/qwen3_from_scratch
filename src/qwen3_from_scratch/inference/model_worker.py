@@ -98,28 +98,46 @@ class ModelWorker:
             result = worker.forward(reqs)
             result_mp.put(result)
 
+    def _query_tokens(self, seq: Sequence) -> list[int]:
+        """本步要处理的输入 token。"""
+        if seq.is_prefill:
+            return seq.prompts[
+                seq.cached_len : seq.cached_len + seq.num_tokens
+            ]
+        # decode：处理 token_ids 的最后一个 token（全命中时为 prompts[-1]）
+        return [seq.token_ids[-1]]
+
+    def _query_positions(self, seq: Sequence) -> list[int]:
+        """本步输入 token 的位置编码。"""
+        if seq.is_prefill:
+            return list(range(seq.cached_len, seq.cached_len + seq.num_tokens))
+        return [len(seq.token_ids) - 1]
+
+    def _kv_len(self, seq: Sequence) -> int:
+        """本步注意力可读的 KV 长度（写后）。"""
+        if seq.is_prefill:
+            return seq.cached_len + seq.num_tokens
+        return len(seq.token_ids)
+
+    def _write_positions(self, seq: Sequence) -> range:
+        """本步需要写入 KV 的绝对位置（全命中 decode 时为空）。"""
+        if seq.is_prefill:
+            return range(seq.cached_len, seq.cached_len + seq.num_tokens)
+        return range(seq.cached_len, len(seq.token_ids))
+
     def _fill_common_context(
         self, context: ModelContext, seqs: list[Sequence]
     ):
         slot_mapping = []
         block_tables = []
         for seq in seqs:
-            slots = []
-            for i in range(0, len(seq), context.block_size):
-                remaining = min(len(seq) - i, context.block_size)
-                slots.extend(
-                    list(
-                        map(
-                            lambda x: (
-                                seq.block_tables[i // context.block_size]
-                                * context.block_size
-                                + x
-                            ),
-                            range(remaining),
-                        )
-                    )
+            for pos in self._write_positions(seq):
+                slot = (
+                    seq.block_tables[pos // context.block_size]
+                    * context.block_size
+                    + pos % context.block_size
                 )
-            slot_mapping.extend(slots[seq.cached_len :])
+                slot_mapping.append(slot)
             block_tables.append(seq.block_tables)
         block_tables = pad_sequence(
             [
@@ -136,17 +154,16 @@ class ModelWorker:
             slot_mapping, device=self.device, dtype=torch.int32
         )
 
-    def build_context_prefill(self, seqs: list[Sequence]):
+    def build_context(self, seqs: list[Sequence]):
+        """混合 batch 的统一上下文构建（prefill 分段 + decode 共存）。"""
         context = get_forward_context()
         positions = []
         cum_seq_lens_q = [0]
         cum_seq_lens_kv = [0]
         for seq in seqs:
-            positions.extend(list(range(len(seq.prompts))))
-            last_cum_seq_q = cum_seq_lens_q[-1]
-            last_cum_seq_k = cum_seq_lens_kv[-1]
-            cum_seq_lens_q.append(last_cum_seq_q + len(seq.prompts))
-            cum_seq_lens_kv.append(last_cum_seq_k + len(seq.prompts))
+            positions.extend(self._query_positions(seq))
+            cum_seq_lens_q.append(cum_seq_lens_q[-1] + seq.num_tokens)
+            cum_seq_lens_kv.append(cum_seq_lens_kv[-1] + self._kv_len(seq))
 
         device = self.device
         context.cum_seq_lens_kv = torch.tensor(
@@ -161,62 +178,23 @@ class ModelWorker:
         self._fill_common_context(context, seqs)
         set_forward_context(context)
 
-    def build_inputs_prefill(self, seqs: list[Sequence]):
+    def build_inputs(self, seqs: list[Sequence]):
         inputs = []
         for seq in seqs:
-            inputs.extend(seq.prompts)
+            inputs.extend(self._query_tokens(seq))
         return torch.tensor(inputs, dtype=torch.int32, device=self.device)
-
-    def build_inputs_decode(self, seqs: list[Sequence]):
-        return torch.tensor(
-            [seq.last_token_id for seq in seqs],
-            device=self.device,
-            dtype=torch.int32,
-        )
-
-    def build_context_decode(self, seqs: list[Sequence]):
-        context = get_forward_context()
-        positions = []
-        cum_seq_lens_q = [0]
-        cum_seq_lens_kv = [0]
-        device = self.device
-        for seq in seqs:
-            # 当前输入 token (last_token_id) 已被 post_process 追加进
-            # token_ids, 索引 = len(seq) - 1, 位置编码取该索引
-            positions.append(len(seq) - 1)
-            last_cum_seq_q = cum_seq_lens_q[-1]
-            last_cum_seq_k = cum_seq_lens_kv[-1]
-            cum_seq_lens_q.append(last_cum_seq_q + 1)
-            cum_seq_lens_kv.append(last_cum_seq_k + len(seq))
-        self._fill_common_context(context, seqs)
-        context.cum_seq_lens_kv = torch.tensor(
-            cum_seq_lens_kv, device=device, dtype=torch.int32
-        )
-        context.cum_seq_lens_q = torch.tensor(
-            cum_seq_lens_q, device=device, dtype=torch.int32
-        )
-        context.position_ids = torch.tensor(
-            positions, device=device, dtype=torch.int32
-        )
-        set_forward_context(context)
 
     @torch.inference_mode
     def forward(self, seqs: list[Sequence]):
-        # 先构建context，然后调用
         assert len(seqs)
-        is_prefill = seqs[0].is_prefill
-        if is_prefill:
-            self.build_context_prefill(seqs)
-            inputs = self.build_inputs_prefill(seqs)
-        else:
-            self.build_context_decode(seqs)
-            inputs = self.build_inputs_decode(seqs)
+        self.build_context(seqs)
+        inputs = self.build_inputs(seqs)
 
         logits = self.model(inputs)
 
-        if is_prefill:
-            context = get_forward_context()
-            indices = context.cum_seq_lens_q[1:] - 1
-            logits = logits[indices]  # [B, vocab]
+        # 每条序列取自身 query 区间最后一个 token 的 logits
+        context = get_forward_context()
+        indices = context.cum_seq_lens_q[1:] - 1
+        logits = logits[indices]  # [B, vocab]
         next_ids = self.sampler(logits)
         return next_ids[:, 0].tolist()  # length B

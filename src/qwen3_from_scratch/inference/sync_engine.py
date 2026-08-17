@@ -62,6 +62,12 @@ class SyncEngine:
                     self.config.scheduler.max_num_tokens,
                     self.config.scheduler.block_size,
                     self.worker.kv_cache.num_pages,
+                    enable_prefix_cache=(
+                        self.config.scheduler.enable_prefix_cache
+                    ),
+                    chunked_prefill_size=(
+                        self.config.scheduler.chunked_prefill_size
+                    ),
                 ),
                 check_seq_finish_func=self._check_seq_finish,
             ),
