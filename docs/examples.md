@@ -11,6 +11,7 @@
 | [sync_engine_example.py](../examples/sync_engine_example.py) | `SyncEngine` 同步推理引擎示例，单请求流式生成并打印性能指标 |
 | [benchmark.py](../examples/benchmark.py) | 性能基准测试，对 `BatchRunner` 做 warmup 后测速 |
 | [server.py](../examples/server.py) | OpenAI 兼容 API 服务器，基于 FastAPI，支持流式对话与模型列表，详见下方章节 |
+| [agent_client.py](../examples/agent_client.py) | 基于 `openai` SDK 的工具调用测试客户端，演示流式多轮 tool calling 链路，配合 `server.py` 使用 |
 | [qwen3_quant_study.py](../examples/qwen3_quant_study.py) | Qwen3 量化研究脚本 |
 | [train/](../examples/train/) | 训练相关示例：数据集转换（`convert_to_jsonl.py`）与训练脚本（`train.py`） |
 
@@ -47,6 +48,20 @@ uv run examples/server.py --config_path examples/configs/batch2_example.yaml --m
 效果展示
 
 ![server](../pics/openai_server.png)
+
+### 工具调用测试
+
+`examples/agent_client.py` 用于验证 `server.py` 的流式 tool calling 能力。它通过 `openai` SDK 向本地服务发起带 `tools` 参数的请求，流式拼装 `tool_calls` 分片，本地执行模拟工具（`get_weather`）后将结果回填到上下文，进入下一轮直到模型不再发起调用。
+
+先按上文启动真实模型服务（`--use_real_model`），然后另开终端运行：
+
+```bash
+uv run examples/agent_client.py
+```
+
+效果展示
+
+![tool_call](../pics/tool_call.png)
 
 ## 模型路径配置
 
