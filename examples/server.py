@@ -277,12 +277,12 @@ def create_app(config_path: str, model_name: str, use_real_model: bool):
             tools=tools,
             tool_choice=tool_choice,
             enable_thinking=enable_thinking,
+            ignore_eos=body.get('ignore_eos', False)
         )
 
     async def completions(
         model: str, messages: list[dict], body: dict
     ) -> CompletionResult:
-        logger.info(json.dumps(messages, ensure_ascii=False))
         if body.get("stream", False):
             # 返回异步生成器，router 会包成 SSE
             return _stream_completion(model, messages, body)
@@ -408,4 +408,4 @@ if __name__ == "__main__":
 
     args = parse_args()
     app = create_app(args.config_path, args.model, args.use_real_model)
-    uvicorn.run(app, host="0.0.0.0", port=8889)
+    uvicorn.run(app, host="0.0.0.0", port=8887)

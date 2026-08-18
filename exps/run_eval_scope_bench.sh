@@ -1,0 +1,14 @@
+evalscope perf \
+  --url http://localhost:8887/v1/chat/completions \
+  --model qwen3-0.6b \
+  --api openai \
+  --parallel 20 \
+  --number 200 \
+  --dataset random \
+  --min-prompt-length 512 \
+  --max-prompt-length 512 \
+  --min-tokens 512 \
+  --max-tokens 512 \
+  --stream \
+  --extra-args '{"ignore_eos":true}' \
+  --tokenizer-path /home/hego/exercise/tech/dl/llama.cpp/models/Qwen3-0.6B

@@ -32,13 +32,16 @@ class Request:
         queue: Queue[RequestResult],
         is_streaming: bool = True,
         max_new_tokens: int | None = None,
+        ignore_eos: bool = False
     ):
         self.req_id = str(uuid4())
         self.prompt = prompt
         self.loop = loop
+        self.ignore_eos = ignore_eos
         self.queue = queue
         self.is_streaming = is_streaming
         self.max_new_tokens = max_new_tokens
+        self.ignore_eos = ignore_eos
 
 
 @dataclass
@@ -122,7 +125,8 @@ class LLMEngine:
                 )
 
     def _check_seq_finish(self, seq: Sequence):
-        return (seq.last_token_id == self.tokenizer.eos_token_id) or (
+        return (seq.last_token_id == self.tokenizer.eos_token_id and not seq.ignore_eos) \
+            or (
             seq.generated_lens > seq.max_new_tokens
         )
 
@@ -177,6 +181,7 @@ class LLMEngine:
                     token_ids.input_ids,
                     req_id=req.req_id,
                     max_new_tokens=max_new_tokens,
+                    ignore_eos=req.ignore_eos
                 )
                 self.requests[req.req_id] = req
                 new_seqs.append(seq)
@@ -197,6 +202,7 @@ class LLMEngine:
         tools: list[dict] | None = None,
         tool_choice: str | dict | None = None,
         enable_thinking: bool | None = None,
+        ignore_eos: bool = False
     ) -> AsyncIterator[StreamChunk]:
         """异步流式生成，yield StreamChunk（解码文本 + 性能指标）。
 
@@ -230,6 +236,7 @@ class LLMEngine:
             max_new_tokens=max_new_tokens
             if max_new_tokens
             else self.config.generation.max_new_tokens,
+            ignore_eos=ignore_eos
         )
         logger.debug(f"put req: {request.req_id}")
 
