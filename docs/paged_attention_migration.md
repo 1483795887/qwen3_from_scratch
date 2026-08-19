@@ -204,7 +204,7 @@ def forward(self, idx):
     ctx = get_forward_context()
     tok_embd = self.tok_embd(idx)
 
-    if ctx.slot_mapping is None:        # batch 模式：自己算 position_ids
+    if ctx.slot_mapping is None:  # batch 模式：自己算 position_ids
         ctx.position_ids = torch.arange(
             ctx.cache_position,
             ctx.cache_position + idx.shape[1],
@@ -219,7 +219,7 @@ def forward(self, idx):
     for layer in self.trf_blocks:
         x = layer(x)
     x = self.final_norm(x)
-    logits = self.output_head(x)
+    logits = self.lm_head(x)
     return logits
 ```
 
