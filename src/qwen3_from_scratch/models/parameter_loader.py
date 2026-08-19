@@ -2,6 +2,7 @@ import os
 from pathlib import Path
 
 import safetensors
+from tqdm import tqdm
 
 
 def load_single_safetensors(file_path: os.PathLike):
@@ -22,10 +23,22 @@ class ParameterLoader:
         self.model_states = {}
         self.loaded_keys = set()
 
+    def _find_safetensors(self, model_path: Path):
+        files = []
+        for file in model_path.rglob("model.*.safetensors"):
+            files.append(file)
+        if len(files) == 0:
+            assert os.path.exists(model_path / "model.safetensors")
+            return [model_path / "model.safetensors"]
+        return sorted(files)  # 好像不排序也无所谓
+
     def load(self, model_path: str):
-        self.model_states = load_single_safetensors(
-            Path(model_path) / "model.safetensors"
-        )
+        self.model_states = {}
+        all_files = self._find_safetensors(Path(model_path))
+        with tqdm(total=len(all_files)) as pbar:
+            for file in all_files:
+                pbar.set_description(f"Loading {file}")
+                self.model_states.update(load_single_safetensors(file))
 
     def get(self, key: str):
         self.loaded_keys.add(key)
