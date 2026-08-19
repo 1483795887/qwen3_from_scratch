@@ -7,7 +7,7 @@ from qwen3_from_scratch.models.common import assign
 from qwen3_from_scratch.models.parameter_loader import ParameterLoader
 
 
-class Qwen3(nn.Module):
+class Qwen3Model(nn.Module):
     def __init__(
         self,
         config: ModelConfig,
@@ -18,12 +18,7 @@ class Qwen3(nn.Module):
         self.tok_embd = nn.Embedding(
             config.vocab_size, config.hidden_size, padding_idx=None
         )
-        if config.tie_word_embeddings:
-            self.output_head = None
-        else:
-            self.output_head = nn.Linear(
-                config.hidden_size, config.vocab_size, bias=False
-            )
+
         self.final_norm = ComponentFactory.create(
             "norm", config=config, dim=config.hidden_size, name="model.norm"
         )
@@ -46,10 +41,6 @@ class Qwen3(nn.Module):
         self.tok_embd.weight = assign(
             self.tok_embd.weight, loader.get("model.embed_tokens.weight")
         )
-        if self.output_head is not None:
-            self.output_head.weight = assign(
-                self.output_head.weight, loader.get("lm_head.weight")
-            )
 
     def forward(self, idx: torch.Tensor):
         tok_embd = self.tok_embd(idx)
@@ -57,8 +48,37 @@ class Qwen3(nn.Module):
         for layer in self.trf_blocks:
             x = layer(x)
         x = self.final_norm(x)
-        if self.output_head is not None:
-            logits = self.output_head(x)
+        return x
+
+
+class Qwen3(nn.Module):
+    def __init__(
+        self,
+        config: ModelConfig,
+        **kwargs,
+    ):
+        super().__init__()
+        self.config = config
+        self.model = Qwen3Model(config, **kwargs)
+
+        if config.tie_word_embeddings:
+            self.lm_head = None
         else:
-            logits = F.linear(x, self.tok_embd.weight)
+            self.lm_head = nn.Linear(
+                config.hidden_size, config.vocab_size, bias=False
+            )
+
+    def load_state(self, loader: ParameterLoader):
+        self.model.load_state(loader)
+        if self.lm_head is not None:
+            self.lm_head.weight = assign(
+                self.lm_head.weight, loader.get("lm_head.weight")
+            )
+
+    def forward(self, idx: torch.Tensor):
+        x = self.model(idx)
+        if self.lm_head is not None:
+            logits = self.lm_head(x)
+        else:
+            logits = F.linear(x, self.model.tok_embd.weight)
         return logits
