@@ -17,6 +17,11 @@ class ModelContext:
     cum_seq_lens_q: torch.Tensor = field(default=torch.Tensor)
     cum_seq_lens_kv: torch.Tensor = field(default=torch.Tensor)
     slot_mapping: torch.Tensor | None = None
+    # 引擎侧预取（每步一次，避免每层每步 D2H 同步；None 表示未预取，走旧路径）
+    cos: torch.Tensor | None = None
+    sin: torch.Tensor | None = None
+    max_seqlen_q: int = 0
+    max_seqlen_k: int = 0
 
 
 _CONTEXT = ModelContext()

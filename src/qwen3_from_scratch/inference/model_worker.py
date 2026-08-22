@@ -1,7 +1,6 @@
 import multiprocessing
 
 import torch
-from torch.nn.utils.rnn import pad_sequence
 
 from qwen3_from_scratch.factory import BatchConfig, GenerationDefaults
 from qwen3_from_scratch.inference import (
@@ -139,20 +138,41 @@ class ModelWorker:
                 )
                 slot_mapping.append(slot)
             block_tables.append(seq.block_tables)
-        block_tables = pad_sequence(
-            [
-                torch.tensor(
-                    block_table, device=self.device, dtype=torch.int32
-                )
-                for block_table in block_tables
-            ],
-            True,
-            -1,
+        # block_tables 一次 CPU 列表 → 单次 HtoD（T7：原实现逐条 .to(device) ×M 次）
+        max_blocks = max(len(s.block_tables) for s in seqs)
+        padded = [
+            s.block_tables + [-1] * (max_blocks - len(s.block_tables))
+            for s in seqs
+        ]
+        context.block_tables = torch.tensor(
+            padded, device=self.device, dtype=torch.int32
         )
-        context.block_tables = block_tables
         context.slot_mapping = torch.tensor(
             slot_mapping, device=self.device, dtype=torch.int32
         )
+
+    def _build_rope_cos_sin(self, positions: list[int]):
+        """CPU 侧索引 cos/sin（无 CUDA 同步），一次 .to(device) 拷回（T4）。
+
+        替代自注意力层每层每步的 position_ids.cpu() + cache[pos] + cat，
+        把每步多次 D2H 同步 + 拷回压缩为每步 1 次。
+        """
+        from qwen3_from_scratch.models.rotary import get_rope
+
+        cfg = self.model.config
+        rotary = get_rope(
+            cfg.head_dim,
+            cfg.head_dim,
+            cfg.max_position_embeddings,
+            cfg.pos_embed_params["rope_theta"],
+        )
+        dtype = self.dtype
+        device = self.device
+        cos_sin = rotary.cos_sin_cache[positions].to(device, dtype)
+        half = cos_sin.shape[-1] // 2
+        cos = torch.cat([cos_sin[..., :half], cos_sin[..., :half]], dim=-1)
+        sin = torch.cat([cos_sin[..., half:], cos_sin[..., half:]], dim=-1)
+        return cos.squeeze(1), sin.squeeze(1)
 
     def build_context(self, seqs: list[Sequence]):
         """混合 batch 的统一上下文构建（prefill 分段 + decode 共存）。"""
@@ -176,6 +196,11 @@ class ModelWorker:
             positions, device=device, dtype=torch.int32
         )
         self._fill_common_context(context, seqs)
+        if device == "cuda":
+            # T4：引擎侧预取 cos/sin 与 max_seqlen（每步一次，避免每层每步 D2H）
+            context.cos, context.sin = self._build_rope_cos_sin(positions)
+            context.max_seqlen_q = max(s.num_tokens for s in seqs)
+            context.max_seqlen_k = max(self._kv_len(s) for s in seqs)
         set_forward_context(context)
 
     def build_inputs(self, seqs: list[Sequence]):
