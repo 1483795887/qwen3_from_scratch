@@ -11,4 +11,4 @@ evalscope perf \
   --max-tokens 512 \
   --stream \
   --extra-args '{"ignore_eos":true}' \
-  --tokenizer-path /home/hego/exercise/tech/dl/llama.cpp/models/Qwen3-0.6B
+  --tokenizer-path $MODEL_PATH

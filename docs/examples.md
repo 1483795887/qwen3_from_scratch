@@ -39,7 +39,7 @@ uv pip install fastapi fastapi-openai-compat uvicorn
 uv run examples/server.py --config_path examples/configs/batch2_example.yaml --model qwen3-0.6b
 ```
 
-默认监听 `0.0.0.0:8889`。默认使用 `FakeEngine`（返回固定的 "hello world"），用于在无模型环境下验证服务链路；加上 `--use_real_model` 后改用真实的 `LLMEngine` 推理：
+默认监听 `0.0.0.0:8887`。默认使用 `FakeEngine`（返回固定的 "hello world"），用于在无模型环境下验证服务链路；加上 `--use_real_model` 后改用真实的 `LLMEngine` 推理：
 
 ```bash
 uv run examples/server.py --config_path examples/configs/batch2_example.yaml --model qwen3-0.6b --use_real_model
