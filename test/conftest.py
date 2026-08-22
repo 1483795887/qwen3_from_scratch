@@ -8,6 +8,10 @@ import torch
 
 from qwen3_from_scratch.factory import load_from_file
 from qwen3_from_scratch.factory.config import ModelConfig
+from qwen3_from_scratch.inference.context import (
+    ModelContext,
+    set_forward_context,
+)
 from qwen3_from_scratch.utils.env import load_env_file
 
 
@@ -37,6 +41,16 @@ def real_model_path():
 def real_model_config(real_model_path):
     """真实模型的配置，从 real_model_path/config.json 读取。"""
     return load_from_file(os.path.join(real_model_path, "config.json"))
+
+
+@pytest.fixture(autouse=True)
+def _reset_forward_context():
+    """每个用例开始前重置全局 forward context。
+
+    model_worker.build_context 等会原地修改模块级 _CONTEXT（不恢复），
+    不加清理时状态会泄漏进后续用例（如 slot_mapping/cos/sin 残留）。
+    """
+    set_forward_context(ModelContext())
 
 
 def pytest_runtest_call(item):
