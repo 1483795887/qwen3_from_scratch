@@ -292,8 +292,10 @@ def create_app(config_path: str, model_name: str, use_real_model: bool):
         model: str, messages: list[dict], body: dict
     ) -> AsyncGenerator[ChatCompletion, None]:
         resp_id = _gen_id()
-        # 首块：角色
-        yield _chunk(resp_id, model, delta=Message(role="assistant"))
+        # 首块：角色（content 用空串而非 None，兼容 evalscope 等客户端拼接）
+        yield _chunk(
+            resp_id, model, delta=Message(role="assistant", content="")
+        )
 
         parser = ToolCallStreamParser()
         has_tool_calls = False
@@ -312,7 +314,9 @@ def create_app(config_path: str, model_name: str, use_real_model: bool):
                         resp_id,
                         model,
                         delta=Message(
-                            role="assistant", reasoning_content=ev.text
+                            role="assistant",
+                            content="",
+                            reasoning_content=ev.text,
                         ),
                     )
                 elif ev.kind == "tool_call":
@@ -323,6 +327,7 @@ def create_app(config_path: str, model_name: str, use_real_model: bool):
                         model,
                         delta=Message(
                             role="assistant",
+                            content="",
                             tool_calls=[
                                 {
                                     "index": tool_index,
@@ -342,7 +347,7 @@ def create_app(config_path: str, model_name: str, use_real_model: bool):
         yield _chunk(
             resp_id,
             model,
-            delta=Message(role="assistant"),
+            delta=Message(role="assistant", content=""),
             finish_reason=finish_reason,
         )
 

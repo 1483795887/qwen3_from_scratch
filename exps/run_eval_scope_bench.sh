@@ -10,5 +10,5 @@ evalscope perf \
   --min-tokens 512 \
   --max-tokens 512 \
   --stream \
-  --extra-args '{"ignore_eos":true}' \
+  --extra-args '{"ignore_eos":true,"enable_thinking":false}' \
   --tokenizer-path $MODEL_PATH
