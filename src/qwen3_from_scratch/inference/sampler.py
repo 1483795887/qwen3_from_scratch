@@ -42,14 +42,15 @@ class TopKSampler(Sampler):
         self.temperature = temperature
 
     def forward(self, logits: torch.Tensor) -> torch.Tensor:
-        top_logits, _ = torch.topk(logits, self.top_k, dim=-1)
+        top_logits, top_indices = torch.topk(logits, self.top_k, dim=-1)
         min_val = top_logits[:, -1].unsqueeze(-1)
-        logits = torch.where(
-            logits < min_val,
+        top_logits = torch.where(
+            top_logits < min_val,
             torch.tensor(
                 float("-inf"), device=logits.device, dtype=logits.dtype
             ),
-            logits,
+            top_logits,
         )
-        probs = torch.softmax(logits / self.temperature, dim=-1)
-        return torch.multinomial(probs, num_samples=1)
+        probs = torch.softmax(top_logits / self.temperature, dim=-1)
+        sampled = torch.multinomial(probs, num_samples=1)
+        return top_indices.gather(1, sampled)
