@@ -311,6 +311,160 @@ def flash_attn_varlen_kernel(
     )
 
 
+@triton.jit
+def flash_attn_varlen_decode_kernel(
+    Q,
+    K,
+    V,
+    output,
+    cu_seqlens_q,
+    cu_seqlens_k,
+    max_seq_len_k,
+    scale,
+    block_tables,
+    NUM_HEADS_KV: tl.constexpr,
+    groups: tl.constexpr,
+    cache_type: tl.constexpr,
+    causal: tl.constexpr,
+    HEAD_DIM: tl.constexpr,
+    BLOCK_SIZE_M: tl.constexpr,
+    BLOCK_SIZE_N: tl.constexpr,
+    PAGE_BLOCK_SIZE: tl.constexpr,
+):
+    """decode 特化（N_Q==1 且 groups>1）：GQA 折叠。
+
+    原 kernel 按 q-head 展开 grid（每个 q-head 独立加载自己 kv-head 的 KV 页），
+    GQA groups=2 时同一 KV 页被两个 q-head 重复读 → 2× 冗余内存流量。
+    本 kernel 按 kv-head 展开，把 groups 个 q-head 折进 BLOCK_SIZE_M 行
+    （行 → token=row//groups、head=kv_id*groups+row%groups），KV 页只加载一次。
+    """
+    b_id = tl.program_id(2)
+    h_id_kv = tl.program_id(1)  # 按 kv-head 展开（原 kernel 按 q-head）
+    n_q_id = tl.program_id(0)  # cdiv(N_Q*groups, BLOCK_SIZE_M)
+    result_o = tl.zeros((BLOCK_SIZE_M, HEAD_DIM), dtype=tl.float32)
+    cu_seqlen_q_start = tl.load(cu_seqlens_q + b_id)
+    cu_seqlen_q_end = tl.load(cu_seqlens_q + b_id + 1)
+    cu_seqlen_k_start = tl.load(cu_seqlens_k + b_id)
+    cu_seqlen_k_end = tl.load(cu_seqlens_k + b_id + 1)
+    N_KEY = cu_seqlen_k_end - cu_seqlen_k_start
+    N_Q = cu_seqlen_q_end - cu_seqlen_q_start  # decode=1，prefill 分段=chunk
+    N_ROWS = N_Q * groups  # 折叠后的 M 行数
+    # 无实际行的程序：N_KEY 0 → k 循环为空 → 不读 KV、store 被 mask 全遮。
+    # （不用早退 return：会破坏 warp_specialize 的控制流约束。）
+    # 混合 batch 中 grid[0] 按最大 N_Q 展开，N_Q 小的请求（decode）只有 n_q_id=0
+    # 有真实行，其余程序空转。
+    has_rows = n_q_id * BLOCK_SIZE_M < N_ROWS
+    N_KEY = tl.where(has_rows, N_KEY, 0)
+    already_cached = N_KEY - N_Q
+
+    HIDDEN_DIM = NUM_HEADS_KV * HEAD_DIM
+    HIDDEN_DIM_Q = groups * HIDDEN_DIM
+    if cache_type == 0:
+        K_ptr = K + cu_seqlen_k_start * HIDDEN_DIM + h_id_kv * HEAD_DIM
+        V_ptr = V + cu_seqlen_k_start * HIDDEN_DIM + h_id_kv * HEAD_DIM
+    else:
+        K_ptr = K + h_id_kv * HEAD_DIM
+        V_ptr = V + h_id_kv * HEAD_DIM
+    if block_tables is not None:
+        num_blocks_per_seq = (
+            max_seq_len_k + PAGE_BLOCK_SIZE - 1
+        ) // PAGE_BLOCK_SIZE
+        block_tables = block_tables + b_id * num_blocks_per_seq
+
+    offsets_qm = n_q_id * BLOCK_SIZE_M + tl.arange(0, BLOCK_SIZE_M)
+    offsets_qd = tl.arange(0, HEAD_DIM)
+    # 行 → (token, q-head)：token = row//groups、head = kv_id*groups + row%groups。
+    # head 偏移 = kv_id*groups*HEAD_DIM + (row%groups)*HEAD_DIM。
+    head_off = (offsets_qm % groups) * HEAD_DIM
+    tok_off = (offsets_qm // groups) * HIDDEN_DIM_Q
+    group_head_stride = groups * HEAD_DIM
+    global_qm = already_cached + (offsets_qm // groups)  # 同组两行同一位置
+    mask_m = offsets_qm[:, None] < N_ROWS
+    mask_d = offsets_qd < HEAD_DIM
+
+    data_q = tl.load(
+        Q
+        + cu_seqlen_q_start * HIDDEN_DIM_Q
+        + h_id_kv * group_head_stride
+        + (tok_off + head_off)[:, None]
+        + offsets_qd[None, :],
+        mask=mask_m & mask_d,
+        other=0.0,
+    )
+    max_val = tl.zeros((BLOCK_SIZE_M, 1), dtype=tl.float32) - float("inf")
+    dominator = tl.zeros((BLOCK_SIZE_M, 1), dtype=tl.float32)
+    if causal:
+        result_o, max_val, dominator = flash_attention_intr(
+            data_q,
+            K_ptr,
+            V_ptr,
+            result_o,
+            max_val,
+            dominator,
+            N_KEY,
+            scale,
+            global_qm,
+            block_tables,
+            1,
+            BLOCK_SIZE_M,
+            BLOCK_SIZE_N,
+            PAGE_BLOCK_SIZE,
+            NUM_HEADS_KV,
+            HEAD_DIM,
+            cache_type,
+        )
+        result_o, max_val, dominator = flash_attention_intr(
+            data_q,
+            K_ptr,
+            V_ptr,
+            result_o,
+            max_val,
+            dominator,
+            N_KEY,
+            scale,
+            global_qm,
+            block_tables,
+            2,
+            BLOCK_SIZE_M,
+            BLOCK_SIZE_N,
+            PAGE_BLOCK_SIZE,
+            NUM_HEADS_KV,
+            HEAD_DIM,
+            cache_type,
+        )
+    else:
+        result_o, max_val, dominator = flash_attention_intr(
+            data_q,
+            K_ptr,
+            V_ptr,
+            result_o,
+            max_val,
+            dominator,
+            N_KEY,
+            scale,
+            global_qm,
+            block_tables,
+            3,
+            BLOCK_SIZE_M,
+            BLOCK_SIZE_N,
+            PAGE_BLOCK_SIZE,
+            NUM_HEADS_KV,
+            HEAD_DIM,
+            cache_type,
+        )
+    dtype = Q.dtype.element_ty
+    result_o = (result_o / dominator).to(dtype)
+    tl.store(
+        output
+        + cu_seqlen_q_start * HIDDEN_DIM_Q
+        + h_id_kv * group_head_stride
+        + (tok_off + head_off)[:, None]
+        + offsets_qd[None, :],
+        result_o,
+        mask=mask_d & mask_m,
+    )
+
+
 def flash_attn_varlen_func(
     q: torch.Tensor,
     k: torch.Tensor,
@@ -339,12 +493,54 @@ def flash_attn_varlen_func(
         PAGE_BLOCK_SIZE = k.shape[1]
         H_k = k.shape[2]
         cache_type = 1
+    output = torch.empty_like(q)
+    groups = H_q // H_k
+    if groups > 1 and causal:
+        # GQA 折叠：decode（N_Q=1）与 chunked prefill（N_Q=chunk）都适用——
+        # 每 kv-head 的 KV 页只加载一次，内存流量减半；混合 batch 中无实际行的
+        # 程序在 kernel 内早退。
+        # T9（ncu 引导调参，2026-08-14）：纯 decode 批（max_seqlen_q==1，
+        # 折叠后 N_ROWS=2）把 BLOCK_SIZE_M 缩到 16——regs 116→72、achieved
+        # occupancy 31→55%、DRAM 72→92%，kernel 378→298µs（-21%，逼近 DRAM
+        # 地板）。混合/prefill 批保持 32：M 缩小会让 causal 前缀被更多 M-tile
+        # 重读，KV 流量翻倍（TTFT 风险），且 decode 程序的 dummy 程序数翻倍。
+        if max_seqlen_q == 1:
+            BLOCK_SIZE_M = 16
+            launch_kwargs = {"num_warps": 4, "num_stages": 3}
+        else:
+            # 混合/prefill 路径保持 triton 默认启动参数，零改动
+            launch_kwargs = {}
+        grid = [
+            triton.cdiv(max_seqlen_q * groups, BLOCK_SIZE_M),
+            H_k,
+            cu_seqlens_q.shape[0] - 1,
+        ]
+        flash_attn_varlen_decode_kernel[grid](
+            q,
+            k,
+            v,
+            output,
+            cu_seqlens_q,
+            cu_seqlens_k,
+            max_seqlen_k,
+            softmax_scale,
+            block_table,
+            H_k,
+            groups,
+            cache_type,
+            causal,
+            D,
+            BLOCK_SIZE_M,
+            BLOCK_SIZE_N,
+            PAGE_BLOCK_SIZE,
+            **launch_kwargs,
+        )
+        return output
     grid = [
         triton.cdiv(max_seqlen_q, BLOCK_SIZE_M),
         H_q,
         cu_seqlens_q.shape[0] - 1,
     ]
-    output = torch.empty_like(q)
     flash_attn_varlen_kernel[grid](
         q,
         k,
@@ -356,7 +552,7 @@ def flash_attn_varlen_func(
         softmax_scale,
         block_table,
         H_k,
-        H_q // H_k,
+        groups,
         cache_type,
         causal,
         D,

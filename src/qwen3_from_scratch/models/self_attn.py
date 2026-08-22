@@ -99,15 +99,19 @@ class FusedSelfAttention(nn.Module):
         self.o_proj = nn.Linear(
             self.num_heads * self.head_dim, hidden_size, bias=False
         )
-        self.q_norm_weight = nn.Parameter(torch.ones(self.head_dim))
-        self.k_norm_weight = nn.Parameter(torch.ones(self.head_dim))
+        # QK-Norm 权重融合为一个 (2, head_dim)：Q 用 [0]，K 用 [1]
+        self.fused_norm_weight = nn.Parameter(torch.ones(2, self.head_dim))
 
     def _get_cos_sin(self, x: torch.Tensor):
         """从预计算的 RotaryEmbedding 获取 cos/sin，按 position_ids 索引。
 
         返回 (cos, sin)，各 (N, head_dim)，N = position_ids 的长度。
+        引擎侧（ModelWorker.build_context_*）已每步预取 cos/sin 到 ctx，
+        直接复用；未预取时走旧路径（CPU 索引 cache）。
         """
         ctx = get_forward_context()
+        if ctx.cos is not None and ctx.sin is not None:
+            return ctx.cos, ctx.sin
         assert ctx.position_ids is not None, (
             "position_ids must be set before forward"
         )
@@ -143,8 +147,9 @@ class FusedSelfAttention(nn.Module):
         k = qkv[:, :, q_end:k_end].reshape(B, S, H_kv, D)
         v = qkv[:, :, k_end:].reshape(B, S, H_kv, D)
 
-        q = torch.nn.functional.rms_norm(q, (D,), self.q_norm_weight, self.eps)
-        k = torch.nn.functional.rms_norm(k, (D,), self.k_norm_weight, self.eps)
+        q_gamma, k_gamma = self.fused_norm_weight.unbind()
+        q = torch.nn.functional.rms_norm(q, (D,), q_gamma, self.eps)
+        k = torch.nn.functional.rms_norm(k, (D,), k_gamma, self.eps)
 
         cos_e = cos.view(1, S, 1, D)
         sin_e = sin.view(1, S, 1, D)
@@ -214,12 +219,12 @@ class FusedSelfAttention(nn.Module):
 
         linear(x, self.qkv_proj.weight, qkv)
 
-        gamma = torch.stack([self.q_norm_weight, self.k_norm_weight])
+        g = self.fused_norm_weight
         from qwen3_from_scratch.kernels.triton.self_attn import (
             fused_qk_norm_rope,
         )
 
-        fused_qk_norm_rope(qkv, gamma, cos, sin, D, self.groups, self.eps)
+        fused_qk_norm_rope(qkv, g, cos, sin, D, self.groups, self.eps)
 
         q_end = H_q * D
         k_end = q_end + H_kv * D
@@ -274,8 +279,9 @@ class FusedSelfAttention(nn.Module):
         destination[prefix + "k_proj.weight"] = dst(k_w)
         destination[prefix + "v_proj.weight"] = dst(v_w)
         destination[prefix + "o_proj.weight"] = dst(self.o_proj.weight)
-        destination[prefix + "q_norm.weight"] = dst(self.q_norm_weight)
-        destination[prefix + "k_norm.weight"] = dst(self.k_norm_weight)
+        q_norm_weight, k_norm_weight = self.fused_norm_weight.unbind()
+        destination[prefix + "q_norm.weight"] = dst(q_norm_weight)
+        destination[prefix + "k_norm.weight"] = dst(k_norm_weight)
         return destination
 
     def load_state(self, loader: ParameterLoader):
@@ -288,11 +294,14 @@ class FusedSelfAttention(nn.Module):
         self.o_proj.weight = assign(
             self.o_proj.weight, loader.get(f"{self.name}.o_proj.weight")
         )
-        self.q_norm_weight = assign(
-            self.q_norm_weight, loader.get(f"{self.name}.q_norm.weight")
-        )
-        self.k_norm_weight = assign(
-            self.k_norm_weight, loader.get(f"{self.name}.k_norm.weight")
+        self.fused_norm_weight = assign(
+            self.fused_norm_weight,
+            torch.stack(
+                [
+                    loader.get(f"{self.name}.q_norm.weight"),
+                    loader.get(f"{self.name}.k_norm.weight"),
+                ]
+            ),
         )
 
 
@@ -320,8 +329,9 @@ class PagedSelfAttention(FusedSelfAttention):
         )
         q, k, v = qkv.split([H_q, H_kv, H_kv], dim=1)
 
-        q = torch.nn.functional.rms_norm(q, (D,), self.q_norm_weight, self.eps)
-        k = torch.nn.functional.rms_norm(k, (D,), self.k_norm_weight, self.eps)
+        q_gamma, k_gamma = self.fused_norm_weight.unbind()
+        q = torch.nn.functional.rms_norm(q, (D,), q_gamma, self.eps)
+        k = torch.nn.functional.rms_norm(k, (D,), k_gamma, self.eps)
 
         cos_e = cos.unsqueeze(1)
         sin_e = sin.unsqueeze(1)
@@ -364,14 +374,14 @@ class PagedSelfAttention(FusedSelfAttention):
         )
         linear(x, self.qkv_proj.weight, qkv)
 
-        gamma = torch.stack([self.q_norm_weight, self.k_norm_weight])
+        g = self.fused_norm_weight
         from qwen3_from_scratch.kernels.triton.self_attn import (
             fused_qk_norm_rope,
         )
 
         fused_qk_norm_rope(
             qkv.view(1, total_seq_len, total_out),
-            gamma,
+            g,
             cos,
             sin,
             D,

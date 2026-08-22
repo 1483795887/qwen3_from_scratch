@@ -1066,7 +1066,7 @@ def _run_update_var_len(
 def _make_paged_cache(model_config, num_pages, block_size, layer_idx, device):
     num_heads_kv = model_config.num_key_value_heads
     head_dim = model_config.head_dim
-    return PagedKVCache(
+    kv_cache = PagedKVCache(
         num_blocks=num_pages,
         layers=1,
         num_heads=num_heads_kv,
@@ -1075,6 +1075,11 @@ def _make_paged_cache(model_config, num_pages, block_size, layer_idx, device):
         block_size=block_size,
         device=device,
     )
+    # 确定性哨兵值填充, 避免 torch.empty 未初始化内存含 NaN
+    # 导致 torch.equal 返回 False (IEEE 754: NaN != NaN)
+    kv_cache.k_cache[layer_idx].fill_(-7.0)
+    kv_cache.v_cache[layer_idx].fill_(-7.0)
+    return kv_cache
 
 
 def _scattered_slot_mapping(block_ids, seq_len, block_size, device):
@@ -1145,10 +1150,6 @@ def test_update_var_len_skips_invalid_slots(model_config, device):
     kv_cache = _make_paged_cache(
         model_config, num_pages, block_size, layer_idx, device
     )
-    # 用确定性哨兵值填充, 避免 torch.empty 未初始化内存含 NaN
-    # 导致 torch.equal 返回 False (IEEE 754: NaN != NaN)
-    kv_cache.k_cache[layer_idx].fill_(-7.0)
-    kv_cache.v_cache[layer_idx].fill_(-7.0)
     ref_k, ref_v = _scatter_reference(
         kv_cache, k_shd, v_shd, slot_mapping, layer_idx, block_size
     )

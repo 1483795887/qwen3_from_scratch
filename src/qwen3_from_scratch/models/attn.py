@@ -378,8 +378,13 @@ class VarLenPagedAttn(MyAttn):
             k_cache, v_cache = context.kv_cache.get(self.layer_idx)
             cum_q = context.cum_seq_lens_q
             cum_kv = context.cum_seq_lens_kv
-            max_seqlen_q = int((cum_q[1:] - cum_q[:-1]).max())
-            max_seqlen_k = int((cum_kv[1:] - cum_kv[:-1]).max())
+            if context.max_seqlen_q > 0:
+                # 引擎侧已每步算好（build_context_*），免去两次 D2H 同步
+                max_seqlen_q = context.max_seqlen_q
+                max_seqlen_k = context.max_seqlen_k
+            else:
+                max_seqlen_q = int((cum_q[1:] - cum_q[:-1]).max())
+                max_seqlen_k = int((cum_kv[1:] - cum_kv[:-1]).max())
             scale = hidden_dim**-0.5
             return flash_attn_varlen_func(
                 q,
