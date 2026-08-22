@@ -13,35 +13,34 @@ uv pip install fastapi fastapi-openai-compat uvicorn
   ``tool_calls``。
 - 同时把 Qwen3 的思维块（THINK_OPEN ... THINK_CLOSE）路由到
   ``reasoning_content``，避免污染正文。
-- 默认带 ``tools`` 时关闭思维（``enable_thinking=False``），输出更干净；可在
-  请求体里用 ``enable_thinking: true`` 覆盖（也支持 chat_template_kwargs）。
+- 默认带 ``tools`` 时关闭思维（``enable_thinking=False``），输出更干净；可用
+  ``chat_template_kwargs.enable_thinking`` 覆盖（请求体顶层字段不透传，与 vLLM 一致）。
 - 同时支持流式（``stream: true``，SSE）与非流式（默认，单个 JSON）两种模式。
 """
 
+import argparse
 import json
 import re
+import time
 from collections.abc import AsyncGenerator
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
 from uuid import uuid4
-import argparse
-import time
 
 from fastapi import FastAPI
-
-from qwen3_from_scratch.inference.llm_engine import (
-    LLMEngine,
-    StreamChunk,
-    PerfMetrics,
-)
 from fastapi_openai_compat import (
+    ChatCompletion,
+    Choice,
     CompletionResult,
     Message,
-    Choice,
-    ChatCompletion,
     create_openai_router,
 )
 
+from qwen3_from_scratch.inference.llm_engine import (
+    LLMEngine,
+    PerfMetrics,
+    StreamChunk,
+)
 from qwen3_from_scratch.inference.logger import get_logger
 
 logger = get_logger(__name__)
@@ -249,6 +248,7 @@ def create_app(config_path: str, model_name: str, use_real_model: bool):
         *,
         delta: Message,
         finish_reason: str | None = None,
+        usage: dict | None = None,
     ) -> ChatCompletion:
         return ChatCompletion(
             id=resp_id,
@@ -258,26 +258,28 @@ def create_app(config_path: str, model_name: str, use_real_model: bool):
             choices=[
                 Choice(index=0, delta=delta, finish_reason=finish_reason)
             ],
+            usage=usage,
         )
 
     def _build_engine_stream(model: str, messages: list[dict], body: dict):
         tools = body.get("tools")
         tool_choice = body.get("tool_choice")
         max_tokens = body.get("max_tokens")
-        # 默认：带 tools 时关闭思维，输出更干净；否则沿用模型默认（思维开启）
+        # 默认：带 tools 时关闭思维，输出更干净；否则沿用模型默认（思维开启）。
+        # 只认 chat_template_kwargs 里的 enable_thinking——顶层字段不透传给模板
+        # （与 vLLM 一致），否则 Qwen3 模板会在 enable_thinking=false 时注入
+        # <think>\n\n</think>\n\n，让实际输入比客户端预期多 4 个 token。
         enable_thinking: bool | None = False if tools else None
         ctk = body.get("chat_template_kwargs") or {}
         if "enable_thinking" in ctk:
             enable_thinking = ctk["enable_thinking"]
-        if "enable_thinking" in body:
-            enable_thinking = body["enable_thinking"]
         return app.state.engine.generate_stream(
             messages,
             max_new_tokens=max_tokens,
             tools=tools,
             tool_choice=tool_choice,
             enable_thinking=enable_thinking,
-            ignore_eos=body.get('ignore_eos', False)
+            ignore_eos=body.get("ignore_eos", False),
         )
 
     async def completions(
@@ -301,15 +303,24 @@ def create_app(config_path: str, model_name: str, use_real_model: bool):
         has_tool_calls = False
         tool_index = 0
         gen = _build_engine_stream(model, messages, body)
+        tok_seq = 0  # 引擎侧 token 序号（含被 parser 吞掉的 marker token）
+        chunk_seq = 0  # 实际 yield 的 chunk 序号（与客户端一一对应）
+        last_metrics = None
+        last_prompt_tokens = 0
         async for item in gen:
+            last_metrics = item.metrics
+            last_prompt_tokens = item.prompt_tokens
+            tok_seq += 1
             for ev in parser.feed(item.delta):
                 if ev.kind == "content" and ev.text:
+                    chunk_seq += 1
                     yield _chunk(
                         resp_id,
                         model,
                         delta=Message(role="assistant", content=ev.text),
                     )
                 elif ev.kind == "reasoning" and ev.text:
+                    chunk_seq += 1
                     yield _chunk(
                         resp_id,
                         model,
@@ -322,6 +333,7 @@ def create_app(config_path: str, model_name: str, use_real_model: bool):
                 elif ev.kind == "tool_call":
                     has_tool_calls = True
                     tc = ev.tool_call
+                    chunk_seq += 1
                     yield _chunk(
                         resp_id,
                         model,
@@ -344,11 +356,24 @@ def create_app(config_path: str, model_name: str, use_real_model: bool):
                     tool_index += 1
 
         finish_reason = "tool_calls" if has_tool_calls else "stop"
+        # 末尾 chunk 带 usage：evalscope 优先用 usage.completion_tokens 统计
+        # output tokens（否则 fallback 只数 content，think 块被漏数 → 470<512）
+        completion_tokens = last_metrics.token_count if last_metrics else 0
+        usage = (
+            {
+                "prompt_tokens": last_prompt_tokens,
+                "completion_tokens": completion_tokens,
+                "total_tokens": last_prompt_tokens + completion_tokens,
+            }
+            if last_metrics
+            else None
+        )
         yield _chunk(
             resp_id,
             model,
             delta=Message(role="assistant", content=""),
             finish_reason=finish_reason,
+            usage=usage,
         )
 
     async def _nonstream_completion(
