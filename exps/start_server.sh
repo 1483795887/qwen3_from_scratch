@@ -1,0 +1,1 @@
+uv run examples/server.py --config_path examples/configs/batch2.yaml --model qwen3-0.6b --use_real_model

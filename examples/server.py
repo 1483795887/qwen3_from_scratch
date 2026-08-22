@@ -277,12 +277,12 @@ def create_app(config_path: str, model_name: str, use_real_model: bool):
             tools=tools,
             tool_choice=tool_choice,
             enable_thinking=enable_thinking,
+            ignore_eos=body.get('ignore_eos', False)
         )
 
     async def completions(
         model: str, messages: list[dict], body: dict
     ) -> CompletionResult:
-        logger.info(json.dumps(messages, ensure_ascii=False))
         if body.get("stream", False):
             # 返回异步生成器，router 会包成 SSE
             return _stream_completion(model, messages, body)
@@ -292,8 +292,10 @@ def create_app(config_path: str, model_name: str, use_real_model: bool):
         model: str, messages: list[dict], body: dict
     ) -> AsyncGenerator[ChatCompletion, None]:
         resp_id = _gen_id()
-        # 首块：角色
-        yield _chunk(resp_id, model, delta=Message(role="assistant"))
+        # 首块：角色（content 用空串而非 None，兼容 evalscope 等客户端拼接）
+        yield _chunk(
+            resp_id, model, delta=Message(role="assistant", content="")
+        )
 
         parser = ToolCallStreamParser()
         has_tool_calls = False
@@ -312,7 +314,9 @@ def create_app(config_path: str, model_name: str, use_real_model: bool):
                         resp_id,
                         model,
                         delta=Message(
-                            role="assistant", reasoning_content=ev.text
+                            role="assistant",
+                            content="",
+                            reasoning_content=ev.text,
                         ),
                     )
                 elif ev.kind == "tool_call":
@@ -323,6 +327,7 @@ def create_app(config_path: str, model_name: str, use_real_model: bool):
                         model,
                         delta=Message(
                             role="assistant",
+                            content="",
                             tool_calls=[
                                 {
                                     "index": tool_index,
@@ -342,7 +347,7 @@ def create_app(config_path: str, model_name: str, use_real_model: bool):
         yield _chunk(
             resp_id,
             model,
-            delta=Message(role="assistant"),
+            delta=Message(role="assistant", content=""),
             finish_reason=finish_reason,
         )
 
@@ -408,4 +413,4 @@ if __name__ == "__main__":
 
     args = parse_args()
     app = create_app(args.config_path, args.model, args.use_real_model)
-    uvicorn.run(app, host="0.0.0.0", port=8889)
+    uvicorn.run(app, host="0.0.0.0", port=8887)

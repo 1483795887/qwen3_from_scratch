@@ -15,6 +15,7 @@ class Sequence:
         prompts: list[int],
         max_new_tokens: int,
         req_id: str | None = None,
+        ignore_eos: bool = False
     ):
         if req_id is None:
             req_id = str(uuid4())
@@ -29,6 +30,7 @@ class Sequence:
         self.block_tables: list[int] = []
         self.status = SequenceStatus.WAITING
         self.max_new_tokens = max_new_tokens
+        self.ignore_eos = ignore_eos
 
     def __len__(self):
         return len(self.token_ids)

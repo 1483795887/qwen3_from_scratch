@@ -7,6 +7,7 @@
 - [📖 技术博客](docs/blog.md) — 从零开始写 Qwen3 系列文章
 - [🚀 启动指南](docs/quickstart.md) — 编译、配置与运行
 - [🧪 使用样本](docs/examples.md) — 示例程序说明
+- [📊 性能测试](docs/benchmark.md) — evalscope 测速方法与 vLLM 对比结果
 
 ## 技术实现
 
@@ -40,6 +41,10 @@ qwen3_from_scratch/
 每个组件会使用 ComponentFactory 进行创建，基于 ModelConfig 配置每个组件的参数，包括具体实现、参数等
 
 每个测试会对不同组件、cpu和cuda都运行，如果不支持cuda会自动跳过
+
+## 性能测试
+
+使用 evalscope 压测本框架与 vLLM 的 OpenAI 兼容 API，在相同负载下对比吞吐与延迟。测速方法与最新对比结果见 [📊 性能测试](docs/benchmark.md)。
 
 ## 引用
 - [transformers库](https://github.com/huggingface/transformers)
