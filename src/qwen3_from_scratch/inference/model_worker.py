@@ -215,11 +215,13 @@ class ModelWorker:
         self.build_context(seqs)
         inputs = self.build_inputs(seqs)
 
-        logits = self.model(inputs)
-
         # 每条序列取自身 query 区间最后一个 token 的 logits
         context = get_forward_context()
         indices = context.cum_seq_lens_q[1:] - 1
-        logits = logits[indices]  # [B, vocab]
+
+        hidden = self.model.forward_hidden(inputs)
+        # 只用算最后一个词元的logits
+        logits = self.model.compute_logits(hidden[indices])  # [B, vocabs]
+
         next_ids = self.sampler(logits)
         return next_ids[:, 0].tolist()  # length B
