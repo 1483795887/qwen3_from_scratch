@@ -32,7 +32,7 @@ class Request:
         queue: Queue[RequestResult],
         is_streaming: bool = True,
         max_new_tokens: int | None = None,
-        ignore_eos: bool = False
+        ignore_eos: bool = False,
     ):
         self.req_id = str(uuid4())
         self.prompt = prompt
@@ -42,6 +42,7 @@ class Request:
         self.is_streaming = is_streaming
         self.max_new_tokens = max_new_tokens
         self.ignore_eos = ignore_eos
+        self.prompt_len = 0
 
 
 @dataclass
@@ -63,6 +64,8 @@ class StreamChunk:
 
     delta: str
     metrics: PerfMetrics
+    req_id: str = ""
+    prompt_tokens: int = 0
 
 
 class LLMEngine:
@@ -125,10 +128,10 @@ class LLMEngine:
                 )
 
     def _check_seq_finish(self, seq: Sequence):
-        return (seq.last_token_id == self.tokenizer.eos_token_id and not seq.ignore_eos) \
-            or (
-            seq.generated_lens > seq.max_new_tokens
-        )
+        return (
+            seq.last_token_id == self.tokenizer.eos_token_id
+            and not seq.ignore_eos
+        ) or (seq.generated_lens >= seq.max_new_tokens)
 
     def _get_incoming_requests(self) -> list[Request]:
         result = []
@@ -181,8 +184,9 @@ class LLMEngine:
                     token_ids.input_ids,
                     req_id=req.req_id,
                     max_new_tokens=max_new_tokens,
-                    ignore_eos=req.ignore_eos
+                    ignore_eos=req.ignore_eos,
                 )
+                req.prompt_len = len(seq.token_ids)
                 self.requests[req.req_id] = req
                 new_seqs.append(seq)
             seqs = self.driver.step(
@@ -202,7 +206,7 @@ class LLMEngine:
         tools: list[dict] | None = None,
         tool_choice: str | dict | None = None,
         enable_thinking: bool | None = None,
-        ignore_eos: bool = False
+        ignore_eos: bool = False,
     ) -> AsyncIterator[StreamChunk]:
         """异步流式生成，yield StreamChunk（解码文本 + 性能指标）。
 
@@ -218,6 +222,8 @@ class LLMEngine:
         """
         queue: asyncio.Queue[RequestResult] = asyncio.Queue()
         if isinstance(prompt, list):
+            # 补全会话必须加 assistant 生成提示（与 vLLM 一致）；缺了它模板会少
+            # 渲染 <|im_start|>assistant\n，导致实际输入比客户端预期少 3 个 token
             template_kwargs: dict = {"add_generation_prompt": True}
             if tools is not None:
                 template_kwargs["tools"] = tools
@@ -236,7 +242,7 @@ class LLMEngine:
             max_new_tokens=max_new_tokens
             if max_new_tokens
             else self.config.generation.max_new_tokens,
-            ignore_eos=ignore_eos
+            ignore_eos=ignore_eos,
         )
         logger.debug(f"put req: {request.req_id}")
 
@@ -279,7 +285,12 @@ class LLMEngine:
                     total_elapsed=total_elapsed,
                 )
 
-            yield StreamChunk(delta=item.delta, metrics=metrics)
+            yield StreamChunk(
+                delta=item.delta,
+                metrics=metrics,
+                req_id=request.req_id,
+                prompt_tokens=request.prompt_len,
+            )
 
     def wait_ready(self):
         """阻塞直到推理进程完成模型加载。

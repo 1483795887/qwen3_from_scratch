@@ -2,6 +2,7 @@ from collections import OrderedDict
 from typing import Optional
 
 import torch
+import torch.nn.functional as F
 from torch import nn
 
 from qwen3_from_scratch.factory import ComponentFactory, ModelConfig
@@ -213,12 +214,7 @@ class FusedSelfAttention(nn.Module):
 
         cos, sin = self._get_cos_sin(x)
 
-        total_out = (H_q + 2 * H_kv) * D
-        qkv = torch.empty(B, S, total_out, dtype=x.dtype, device=x.device)
-        from qwen3_from_scratch.kernels.triton.gemm import linear
-
-        linear(x, self.qkv_proj.weight, qkv)
-
+        qkv = self.qkv_proj(x)
         g = self.fused_norm_weight
         from qwen3_from_scratch.kernels.triton.self_attn import (
             fused_qk_norm_rope,
@@ -252,11 +248,7 @@ class FusedSelfAttention(nn.Module):
         o = flash_attention(q, k, v, is_causal=S > 1)
 
         o = o.transpose(1, 2).reshape(B, S, -1)
-        output = torch.empty(
-            B, S, self.config.hidden_size, dtype=x.dtype, device=x.device
-        )
-        linear(o, self.o_proj.weight, output, bias=residual)
-        return output
+        return F.linear(o, self.o_proj.weight, bias=residual)
 
     def state_dict(self, destination=None, prefix="", keep_vars=False):
         if destination is None:
@@ -347,10 +339,7 @@ class PagedSelfAttention(FusedSelfAttention):
 
         o = self.attn(q, k, v)
         o = o.reshape(total_seq_len, -1)
-        o = torch.nn.functional.linear(o, self.o_proj.weight)
-        if residual is not None:
-            o = o + residual
-        return o
+        return F.linear(o, self.o_proj.weight, bias=residual)
 
     def forward(
         self, x: torch.Tensor, residual: Optional[torch.Tensor] = None
@@ -366,13 +355,8 @@ class PagedSelfAttention(FusedSelfAttention):
 
         cos, sin = self._get_cos_sin(x)
 
-        from qwen3_from_scratch.kernels.triton.gemm import linear
-
         total_out = (H_q + 2 * H_kv) * D
-        qkv = torch.empty(
-            total_seq_len, total_out, dtype=x.dtype, device=x.device
-        )
-        linear(x, self.qkv_proj.weight, qkv)
+        qkv = self.qkv_proj(x)
 
         g = self.fused_norm_weight
         from qwen3_from_scratch.kernels.triton.self_attn import (
@@ -399,11 +383,4 @@ class PagedSelfAttention(FusedSelfAttention):
 
         o = self.attn(q, k, v)
         o = o.reshape(total_seq_len, -1)
-        output = torch.empty(
-            total_seq_len,
-            self.config.hidden_size,
-            dtype=x.dtype,
-            device=x.device,
-        )
-        linear(o, self.o_proj.weight, output, bias=residual)
-        return output
+        return F.linear(o, self.o_proj.weight, bias=residual)

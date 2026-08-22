@@ -9,3 +9,6 @@ build/
 profile/
 # 本地模型路径配置（含个人路径，不提交）
 examples/configs/batch2.yaml
+outputs/
+handoffs/
+HANDOFF.md
