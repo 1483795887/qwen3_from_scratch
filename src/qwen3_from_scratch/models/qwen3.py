@@ -1,5 +1,4 @@
 import torch
-import torch.nn.functional as F
 from torch import nn
 
 from qwen3_from_scratch.factory import ComponentFactory, ModelConfig
@@ -61,24 +60,25 @@ class Qwen3(nn.Module):
         self.config = config
         self.model = Qwen3Model(config, **kwargs)
 
-        if config.tie_word_embeddings:
-            self.lm_head = None
-        else:
-            self.lm_head = nn.Linear(
-                config.hidden_size, config.vocab_size, bias=False
-            )
+        self.lm_head = nn.Linear(
+            config.hidden_size, config.vocab_size, bias=False
+        )
 
     def load_state(self, loader: ParameterLoader):
         self.model.load_state(loader)
-        if self.lm_head is not None:
+        if self.config.tie_word_embeddings:
+            self.lm_head.weight = self.model.tok_embd.weight
+        else:
             self.lm_head.weight = assign(
                 self.lm_head.weight, loader.get("lm_head.weight")
             )
 
     def forward(self, idx: torch.Tensor):
-        x = self.model(idx)
-        if self.lm_head is not None:
-            logits = self.lm_head(x)
-        else:
-            logits = F.linear(x, self.model.tok_embd.weight)
-        return logits
+        hidden = self.forward_hidden(idx)
+        return self.compute_logits(hidden)
+
+    def forward_hidden(self, idx: torch.Tensor) -> torch.Tensor:
+        return self.model(idx)
+
+    def compute_logits(self, hidden: torch.Tensor) -> torch.Tensor:
+        return self.lm_head(hidden)
