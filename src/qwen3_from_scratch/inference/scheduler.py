@@ -14,6 +14,9 @@ class SchedulerConfig:
     max_blocks: int
     enable_prefix_cache: bool = True
     chunked_prefill_size: int = 512
+    # prefill 每步可用额度上限占 max_num_tokens 的比例 (0, 1]；
+    # 低于 1 时预留 (1-watermark)*max_num_tokens 给 decode
+    watermark: float = 1.0
 
 
 class Scheduler:
@@ -28,6 +31,11 @@ class Scheduler:
         self.max_num_tokens = config.max_num_tokens
         self.block_size = config.block_size
         self.chunked_prefill_size = config.chunked_prefill_size
+        self.watermark = config.watermark
+        if not 0 < self.watermark <= 1:
+            raise ValueError(
+                f"watermark 必须是 (0, 1] 的比例，got {self.watermark}"
+            )
         self.waiting: deque[Sequence] = deque()
         self.active: deque[Sequence] = deque()
         self.block_manager = BlockManager(
@@ -52,39 +60,62 @@ class Scheduler:
         used_tokens = used_seqs  # decode 每条消费 1 token
         prefill_reqs = self._schedule_prefill(
             self.max_num_seqs - used_seqs,
-            self.max_num_tokens - used_tokens,
+            self._prefill_token_budget(used_tokens),
         )
         return decode_reqs + prefill_reqs
+
+    def _prefill_token_budget(self, used_tokens: int) -> int:
+        """prefill 可用额度：剩余额度再受 watermark 水位封顶，给 decode 留底。"""
+        remaining = self.max_num_tokens - used_tokens
+        cap = int(self.max_num_tokens * self.watermark)
+        return min(remaining, cap)
+
+    def _drain_active(self) -> tuple[deque[Sequence], deque[Sequence]]:
+        """把 active 按阶段分成两堆：decode 就绪 / 仍在 prefill。"""
+        decode_ready: deque[Sequence] = deque()
+        prefilling: deque[Sequence] = deque()
+        for _ in range(len(self.active)):
+            seq = self.active.popleft()
+            (prefilling if seq.is_prefill else decode_ready).append(seq)
+        return decode_ready, prefilling
+
+    def _restore_active(self, *groups: deque[Sequence]):
+        """按给定顺序把各堆序列放回 active（顺序即下轮 FCFS 优先级）。"""
+        for group in groups:
+            self.active.extend(group)
 
     def _schedule_decode(self) -> list[Sequence]:
         scheduled: list[Sequence] = []
         budget = min(self.max_num_seqs, self.max_num_tokens)
 
-        prefilling: deque[Sequence] = deque()
-        decode_ready: deque[Sequence] = deque()
-        for _ in range(len(self.active)):
-            seq = self.active.popleft()
-            (prefilling if seq.is_prefill else decode_ready).append(seq)
+        decode_ready, prefilling = self._drain_active()
 
         while decode_ready and len(scheduled) < budget:
             seq = decode_ready.popleft()
-            while not self.block_manager.can_allocate(seq, 1):
-                if decode_ready:
-                    # 抢占最新生成的，浪费计算最少
-                    self._preempt(decode_ready.pop())
-                else:
-                    # 它就是最后一个解码请求，也是最新的，把自己释放了
-                    self._preempt(seq)
-                    break
-            else:
-                self.block_manager.allocate(seq, 1)
-                seq.num_tokens = 1
+            if self._allocate_decode_slot(seq, decode_ready):
                 scheduled.append(seq)
 
-        self.active.extend(prefilling)
-        self.active.extend(decode_ready)
-        self.active.extend(scheduled)
+        self._restore_active(prefilling, decode_ready, scheduled)
         return scheduled
+
+    def _allocate_decode_slot(
+        self, seq: Sequence, decode_ready: deque[Sequence]
+    ) -> bool:
+        """给 seq 分配 1 个 decode token；放不下时抢占最新 decode 让位。
+
+        返回是否成功调度（抢占 seq 自身时返回 False）。
+        """
+        while not self.block_manager.can_allocate(seq, 1):
+            if decode_ready:
+                # 抢占最新生成的，浪费计算最少
+                self._preempt(decode_ready.pop())
+            else:
+                # 它就是最后一个解码请求，也是最新的，把自己释放了
+                self._preempt(seq)
+                return False
+        self.block_manager.allocate(seq, 1)
+        seq.num_tokens = 1
+        return True
 
     def _schedule_prefill(
         self, max_seqs: int, max_tokens: int
@@ -92,33 +123,50 @@ class Scheduler:
         scheduled: list[Sequence] = []
         batched_tokens = 0
 
-        # 1. 优先继续 active 里还在 prefill 的序列（FCFS）
-        prefilling: deque[Sequence] = deque()
-        decode: deque[Sequence] = deque()
-        for _ in range(len(self.active)):
-            seq = self.active.popleft()
-            (prefilling if seq.is_prefill else decode).append(seq)
+        decode_ready, prefilling = self._drain_active()
 
+        # 1. 优先继续 active 里还在 prefill 的序列（FCFS）
+        batched_tokens = self._resume_prefilling(
+            prefilling, scheduled, max_seqs, max_tokens, batched_tokens
+        )
+        # 2. 拉 waiting 新序列
+        batched_tokens = self._admit_waiting(
+            scheduled, max_seqs, max_tokens, batched_tokens
+        )
+
+        self._restore_active(decode_ready, prefilling, scheduled)
+        return scheduled
+
+    def _resume_prefilling(
+        self,
+        prefilling: deque[Sequence],
+        scheduled: list[Sequence],
+        max_seqs: int,
+        max_tokens: int,
+        batched_tokens: int,
+    ) -> int:
         prefilling_nums = len(prefilling)
         for _ in range(prefilling_nums):
             if len(scheduled) >= max_seqs or batched_tokens >= max_tokens:
                 break
             seq = prefilling.popleft()
-            remaining = len(seq.prompts) - seq.cached_len
-            chunk = min(
-                remaining,
-                self.chunked_prefill_size,
-                max_tokens - batched_tokens,
+            chunk = self._try_allocate_prefill_chunk(
+                seq, max_tokens - batched_tokens
             )
-            if not self.block_manager.can_allocate(seq, chunk):
+            if chunk is None:
                 prefilling.append(seq)
                 continue
-            self.block_manager.allocate(seq, chunk)
-            seq.num_tokens = chunk
             scheduled.append(seq)
             batched_tokens += chunk
+        return batched_tokens
 
-        # 2. 拉 waiting 新序列
+    def _admit_waiting(
+        self,
+        scheduled: list[Sequence],
+        max_seqs: int,
+        max_tokens: int,
+        batched_tokens: int,
+    ) -> int:
         waiting_nums = len(self.waiting)
         for _ in range(waiting_nums):
             if len(scheduled) >= max_seqs or batched_tokens >= max_tokens:
@@ -133,24 +181,36 @@ class Scheduler:
                 seq.status = SequenceStatus.RUNNING
                 self.active.append(seq)
                 continue
-            chunk = min(
-                remaining,
-                self.chunked_prefill_size,
-                max_tokens - batched_tokens,
-            )
-            if not self.block_manager.can_allocate(seq, chunk):
+            tokens_budget = max_tokens - batched_tokens
+            if remaining > tokens_budget:
+                # 完整提示词塞不进剩余额度：不按 chunk 塞部分进场，
+                # 避免一批塞太多新预填充，挤占 decode 可用的资源
                 self.waiting.append(seq)
                 continue
-            self.block_manager.allocate(seq, chunk)
-            seq.num_tokens = chunk
+            chunk = self._try_allocate_prefill_chunk(seq, tokens_budget)
+            if chunk is None:
+                self.waiting.append(seq)
+                continue
             seq.status = SequenceStatus.RUNNING
             scheduled.append(seq)
             batched_tokens += chunk
+        return batched_tokens
 
-        self.active.extend(decode)
-        self.active.extend(prefilling)
-        self.active.extend(scheduled)
-        return scheduled
+    def _try_allocate_prefill_chunk(
+        self, seq: Sequence, tokens_budget: int
+    ) -> int | None:
+        """尝试给 seq 分段分配 prefill token：预算内取 chunk，块不足返回 None。
+
+        调用方负责：分配成功后的记账（scheduled/status/batched_tokens），
+        分配失败时的归属（回 prefill 队列 / waiting）。
+        """
+        remaining = len(seq.prompts) - seq.cached_len
+        chunk = min(remaining, self.chunked_prefill_size, tokens_budget)
+        if not self.block_manager.can_allocate(seq, chunk):
+            return None
+        self.block_manager.allocate(seq, chunk)
+        seq.num_tokens = chunk
+        return chunk
 
     def _preempt(self, seq: Sequence):
         self.block_manager.deallocate(seq)

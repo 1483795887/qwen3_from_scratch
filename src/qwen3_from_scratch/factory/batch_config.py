@@ -146,6 +146,8 @@ class SchedulerDefaults:
     gpu_utilization: float = 0.5
     enable_prefix_cache: bool = True
     chunked_prefill_size: int = 512
+    # prefill 可用 token 上限比例 (0, 1]，预留 (1-watermark) 给 decode
+    watermark: float = 1.0
 
 
 # ── 顶层配置 ──────────────────────────────────
@@ -269,6 +271,7 @@ def load_batch_config(config_path: str) -> BatchConfig:
         gpu_utilization=scheduler_raw.get("gpu_utilization", 0.5),
         enable_prefix_cache=scheduler_raw.get("enable_prefix_cache", True),
         chunked_prefill_size=scheduler_raw.get("chunked_prefill_size", 512),
+        watermark=scheduler_raw.get("watermark", 1.0),
     )
 
     # 解析 KVCache dtype

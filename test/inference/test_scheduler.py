@@ -15,6 +15,8 @@ def make_scheduler(
     max_num_tokens=100,
     check_seq_finish_func: Callable[[Sequence], bool] = lambda seq: False,
     enable_prefix_cache: bool = False,
+    chunked_prefill_size: int = 512,
+    watermark: float = 1.0,
 ) -> Scheduler:
     config = SchedulerConfig(
         max_num_seqs=max_num_seqs,
@@ -22,6 +24,8 @@ def make_scheduler(
         block_size=block_size,
         max_blocks=num_pages,
         enable_prefix_cache=enable_prefix_cache,
+        chunked_prefill_size=chunked_prefill_size,
+        watermark=watermark,
     )
     return Scheduler(config, check_seq_finish_func)
 
@@ -103,19 +107,23 @@ class TestSchedule:
         assert len(reqs) == 2
 
     def test_restricted_by_max_token_num(self):
-        # 分段 prefill 会把剩余额度用部分 chunk 填满：2 + 2 + 1 = 5
+        # 完整提示词塞不进剩余额度时不再准入：2 + 2 后余量 1
+        # 放不下完整 2 token 的提示词，第三个留在 waiting
         scheduler = make_scheduler(max_num_tokens=5, max_num_seqs=1000)
         for _ in range(100):
             scheduler.add_request(make_sequence(2))
         reqs = scheduler.schedule()
-        assert len(reqs) == 3
+        assert len(reqs) == 2
 
     def test_chunked_prefill_splits_long_prompt_across_steps(self):
-        scheduler = make_scheduler(max_num_tokens=3, max_num_seqs=1000)
+        # 准入要求完整提示词（5 token）塞得进额度；实际每段只取 chunked_prefill_size=3
+        scheduler = make_scheduler(
+            max_num_tokens=10, max_num_seqs=1000, chunked_prefill_size=3
+        )
         scheduler.add_request(make_sequence(5))
         reqs = scheduler.schedule()
         assert len(reqs) == 1
-        assert reqs[0].num_tokens == 3  # 第一段填满额度
+        assert reqs[0].num_tokens == 3  # 第一段取 chunked_prefill_size
         scheduler.post_process(reqs, [0])
         reqs = scheduler.schedule()
         assert len(reqs) == 1
@@ -159,16 +167,14 @@ class TestSchedule:
         assert seq_b.block_tables[:2] == seq_a.block_tables[:2]
 
     def test_decode_restricted_by_max_token_num(self):
+        # 9 条序列已全部进入解码，受 max_num_tokens=7 限制每轮只调度 7 条
         scheduler = make_scheduler(max_num_tokens=7, max_num_seqs=1000)
         for _ in range(9):
-            scheduler.add_request(make_sequence(2))
-        reqs = scheduler.schedule()
-        scheduler.post_process(reqs, [0] * len(reqs))
-        reqs = scheduler.schedule()
-        scheduler.post_process(reqs, [0] * len(reqs))
-        reqs = scheduler.schedule()
-        scheduler.post_process(reqs, [0] * len(reqs))
-        # 此时有9个解码，但受限于长度只能调度7个
+            seq = make_sequence(2)
+            scheduler.block_manager.allocate(seq, 2)
+            seq.cached_len = 2
+            seq.status = SequenceStatus.RUNNING
+            scheduler.active.append(seq)
         reqs = scheduler.schedule()
         assert len(reqs) == 7
 
@@ -185,6 +191,90 @@ class TestSchedule:
         # 此时有9个解码，但受限于长度只能调度5个
         reqs = scheduler.schedule()
         assert len(reqs) == 5
+
+
+class TestAdmitWaiting:
+    def test_full_prompt_must_fit_budget(self):
+        # 额度 5 塞不下完整 6 token 提示词：即使能塞 5 token 的 chunk 也不准入
+        scheduler = make_scheduler(max_num_tokens=5, max_num_seqs=1000)
+        scheduler.add_request(make_sequence(6))
+        reqs = scheduler.schedule()
+        assert len(reqs) == 0
+        assert len(scheduler.waiting) == 1
+
+    def test_full_prompt_fits_budget_prefills_whole(self):
+        # 完整提示词 4 ≤ 额度 5：整段进场
+        scheduler = make_scheduler(max_num_tokens=5, max_num_seqs=1000)
+        scheduler.add_request(make_sequence(4))
+        reqs = scheduler.schedule()
+        assert len(reqs) == 1
+        assert reqs[0].num_tokens == 4
+
+    def test_short_prompts_preferred_over_long_when_budget_tight(self):
+        # 长提示词（6 token）塞不进额度 5 时留在 waiting，短提示词先进场
+        scheduler = make_scheduler(max_num_tokens=5, max_num_seqs=1000)
+        scheduler.add_request(make_sequence(6))
+        scheduler.add_request(make_sequence(2))
+        scheduler.add_request(make_sequence(2))
+        reqs = scheduler.schedule()
+        assert len(reqs) == 2
+        assert all(r.num_tokens == 2 for r in reqs)
+        assert len(scheduler.waiting) == 1
+
+
+class TestWatermark:
+    def test_prefill_capped_at_watermark(self):
+        # 无 decode 时 prefill 总额度被 watermark 封顶：0.5 * 100 = 50 token
+        scheduler = make_scheduler(
+            max_num_tokens=100, max_num_seqs=1000, watermark=0.5
+        )
+        for _ in range(100):
+            scheduler.add_request(make_sequence(2))
+        reqs = scheduler.schedule()
+        assert len(reqs) == 25
+        assert sum(r.num_tokens for r in reqs) == 50
+
+    def test_watermark_reserves_budget_when_decode_present(self):
+        # decode 30 条后剩余 70，watermark 0.5 把 prefill 封顶到 50
+        scheduler = make_scheduler(
+            max_num_tokens=100, max_num_seqs=1000, watermark=0.5
+        )
+        for _ in range(30):
+            scheduler.add_request(make_sequence(2))
+        # 两轮把 30 条全部送进 decode（第一轮 watermark 封顶只进 25 条）
+        for _ in range(2):
+            reqs = scheduler.schedule()
+            scheduler.post_process(reqs, [0] * len(reqs))
+        for _ in range(100):
+            scheduler.add_request(make_sequence(2))
+        reqs = scheduler.schedule()
+        decode_seqs = [r for r in reqs if not r.is_prefill]
+        prefill_seqs = [r for r in reqs if r.is_prefill]
+        assert len(decode_seqs) == 30
+        assert sum(r.num_tokens for r in prefill_seqs) == 50  # min(100-30, 50)
+
+    def test_watermark_one_no_reserve(self):
+        # watermark=1.0 不预留：prefill 额度 = max_num_tokens - decode 数
+        scheduler = make_scheduler(
+            max_num_tokens=100, max_num_seqs=1000, watermark=1.0
+        )
+        for _ in range(30):
+            scheduler.add_request(make_sequence(2))
+        reqs = scheduler.schedule()
+        scheduler.post_process(reqs, [0] * len(reqs))
+        for _ in range(100):
+            scheduler.add_request(make_sequence(2))
+        reqs = scheduler.schedule()
+        prefill_tokens = sum(r.num_tokens for r in reqs if r.is_prefill)
+        assert prefill_tokens == 70  # min(100 - 30, 100)
+
+    def test_invalid_watermark_rejected(self):
+        import pytest
+
+        with pytest.raises(ValueError):
+            make_scheduler(watermark=0)
+        with pytest.raises(ValueError):
+            make_scheduler(watermark=1.5)
 
 
 class TestPostProcess:

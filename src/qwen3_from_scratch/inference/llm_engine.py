@@ -156,6 +156,7 @@ class LLMEngine:
                 blocks,
                 enable_prefix_cache=self.config.scheduler.enable_prefix_cache,
                 chunked_prefill_size=self.config.scheduler.chunked_prefill_size,
+                watermark=self.config.scheduler.watermark,
             ),
             check_seq_finish_func=self._check_seq_finish,
         )
