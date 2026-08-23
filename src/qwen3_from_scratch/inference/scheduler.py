@@ -14,6 +14,9 @@ class SchedulerConfig:
     max_blocks: int
     enable_prefix_cache: bool = True
     chunked_prefill_size: int = 512
+    # prefill 每步可用额度上限占 max_num_tokens 的比例 (0, 1]；
+    # 低于 1 时预留 (1-watermark)*max_num_tokens 给 decode
+    watermark: float = 1.0
 
 
 class Scheduler:
@@ -28,6 +31,11 @@ class Scheduler:
         self.max_num_tokens = config.max_num_tokens
         self.block_size = config.block_size
         self.chunked_prefill_size = config.chunked_prefill_size
+        self.watermark = config.watermark
+        if not 0 < self.watermark <= 1:
+            raise ValueError(
+                f"watermark 必须是 (0, 1] 的比例，got {self.watermark}"
+            )
         self.waiting: deque[Sequence] = deque()
         self.active: deque[Sequence] = deque()
         self.block_manager = BlockManager(
@@ -52,9 +60,15 @@ class Scheduler:
         used_tokens = used_seqs  # decode 每条消费 1 token
         prefill_reqs = self._schedule_prefill(
             self.max_num_seqs - used_seqs,
-            self.max_num_tokens - used_tokens,
+            self._prefill_token_budget(used_tokens),
         )
         return decode_reqs + prefill_reqs
+
+    def _prefill_token_budget(self, used_tokens: int) -> int:
+        """prefill 可用额度：剩余额度再受 watermark 水位封顶，给 decode 留底。"""
+        remaining = self.max_num_tokens - used_tokens
+        cap = int(self.max_num_tokens * self.watermark)
+        return min(remaining, cap)
 
     def _drain_active(self) -> tuple[deque[Sequence], deque[Sequence]]:
         """把 active 按阶段分成两堆：decode 就绪 / 仍在 prefill。"""
@@ -167,9 +181,13 @@ class Scheduler:
                 seq.status = SequenceStatus.RUNNING
                 self.active.append(seq)
                 continue
-            chunk = self._try_allocate_prefill_chunk(
-                seq, max_tokens - batched_tokens
-            )
+            tokens_budget = max_tokens - batched_tokens
+            if remaining > tokens_budget:
+                # 完整提示词塞不进剩余额度：不按 chunk 塞部分进场，
+                # 避免一批塞太多新预填充，挤占 decode 可用的资源
+                self.waiting.append(seq)
+                continue
+            chunk = self._try_allocate_prefill_chunk(seq, tokens_budget)
             if chunk is None:
                 self.waiting.append(seq)
                 continue

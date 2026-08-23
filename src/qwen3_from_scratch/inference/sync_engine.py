@@ -68,6 +68,7 @@ class SyncEngine:
                     chunked_prefill_size=(
                         self.config.scheduler.chunked_prefill_size
                     ),
+                    watermark=self.config.scheduler.watermark,
                 ),
                 check_seq_finish_func=self._check_seq_finish,
             ),
