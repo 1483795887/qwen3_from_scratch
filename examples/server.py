@@ -41,7 +41,7 @@ from qwen3_from_scratch.inference.llm_engine import (
     PerfMetrics,
     StreamChunk,
 )
-from qwen3_from_scratch.inference.logger import get_logger
+from qwen3_from_scratch.utils.logger import get_logger
 
 logger = get_logger(__name__)
 
