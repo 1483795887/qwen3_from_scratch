@@ -6,7 +6,7 @@ import jinja2
 import torch
 
 from qwen3_from_scratch.factory.config import load_from_file
-from qwen3_from_scratch.inference.engine import BatchRunner
+from qwen3_from_scratch.inference.batch_engine import BatchRunner
 from qwen3_from_scratch.inference.sampler import GreedySampler
 from qwen3_from_scratch.utils.env import load_env_file
 

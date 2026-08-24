@@ -5,7 +5,7 @@
 """
 
 from qwen3_from_scratch.factory.batch_config import load_batch_config
-from qwen3_from_scratch.inference.engine import BatchRunner
+from qwen3_from_scratch.inference.batch_engine import BatchRunner
 
 CONFIG_PATH = "examples/configs/batch.yaml"
 

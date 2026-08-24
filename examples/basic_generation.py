@@ -1,6 +1,6 @@
 import os
 
-from qwen3_from_scratch.inference.engine import BatchRunner
+from qwen3_from_scratch.inference.batch_engine import BatchRunner
 from qwen3_from_scratch.utils.env import load_env_file
 
 load_env_file()
