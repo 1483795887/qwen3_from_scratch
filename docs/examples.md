@@ -5,6 +5,7 @@
 | 文件 | 说明 |
 | --- | --- |
 | [basic_generation.py](../examples/basic_generation.py) | 最简单的模型推理示例，通过 `BatchRunner` 单模型生成，可修改提示词查看整体运行情况 |
+| [llm_example.py](../examples/llm_example.py) | 基于 `LLM` 类的高层同步推理示例，封装了 `EngineCore` 与 `InProcClient`，开箱即用，支持 warmup 与 `enable_thinking` |
 | [llm_runner.py](../examples/llm_runner.py) | 基于 `LLMEngine` 的推理引擎示例，支持流式生成与多模型批量配置，详见 [启动指南](quickstart.md) |
 | [run_from_config.py](../examples/run_from_config.py) | 从 YAML 配置文件加载多模型并运行推理，演示 `BatchConfig → get_model → from_model_entry` 的两步加载流程 |
 | [run_minimind.py](../examples/run_minimind.py) | 运行 minimind-3-moe 小模型，需要设置环境变量 `MINIMIND_MODEL_PATH` |
@@ -69,4 +70,4 @@ uv run examples/agent_client.py
 
 - 基于 Qwen3 的示例读取环境变量 `MODEL_PATH`（在 `.env` 中配置）
 - `run_minimind.py` 读取环境变量 `MINIMIND_MODEL_PATH`，模型可从[魔搭](https://modelscope.cn/models/gongjy/minimind-3-moe)或 [HuggingFace](https://huggingface.co/jingyaogong/minimind-3-moe) 下载
-- 基于配置文件的示例（`run_from_config.py`、`llm_runner.py`）将 `examples/configs/*.yaml` 中的 `path` 改为自己的模型下载路径
+- 基于配置文件的示例（`run_from_config.py`、`llm_runner.py`、`llm_example.py`）将 `examples/configs/*.yaml` 中的 `path` 改为自己的模型下载路径
