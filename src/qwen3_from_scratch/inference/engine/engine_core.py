@@ -66,10 +66,13 @@ class EngineCore:
         self.scheduler.post_process(planned, token_ids)
         outputs: list[EngineStepOutput] = []
         for seq in planned:
+            new_token_ids = (
+                [] if seq.last_token_id == -1 else [seq.last_token_id]
+            )
             outputs.append(
                 EngineStepOutput(
                     req_id=seq.req_id,
-                    new_token_ids=[seq.last_token_id],
+                    new_token_ids=new_token_ids,
                     finished=seq.status == SequenceStatus.FINISHED,
                     generated_token_num=seq.generated_lens,
                 )
