@@ -24,7 +24,8 @@ def main():
             [{"role": "user", "content": "介绍一下你自己"}],
             [{"role": "user", "content": "你有哪些技能"}],
             [{"role": "user", "content": "1+1等于几"}],
-        ]
+        ],
+        GenerateParams(),
     ):
         print(res)
 
