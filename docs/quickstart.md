@@ -29,25 +29,31 @@ cp .env.example .env
 ![pics](../pics/basic_generation.png)
 
 - [examples/llm_example.py](../examples/llm_example.py)，基于 `LLM` 类的高层同步 API，封装了 `EngineCore` 与 `InProcClient`，开箱即用，详见下方 [llm_example 使用](#llm_example-使用)
-- [examples/llm_runner.py](../examples/llm_runner.py)，基于 `LLMEngine` 的推理引擎示例，支持流式生成与多模型批量配置
+- [examples/async_llm_example.py](../examples/async_llm_example.py)，基于 `AsyncLLM` 的推理引擎示例，支持流式生成与多模型批量配置
 - [examples/server.py](../examples/server.py)，OpenAI 兼容 API 服务器，详见 [使用样本](examples.md)
 
 更多示例见 [使用样本](examples.md)。
 
 ### llm_runner 使用
 
-`examples/llm_runner.py` 通过 `LLMEngine` 驱动一个后台推理进程完成生成，调用方以流式方式接收结果：
+`../examples/async_llm_example.py` 通过 `AsyncLLM` 驱动一个后台推理进程完成生成，调用方以流式方式接收结果：
 
 ```python
-from qwen3_from_scratch.inference.llm_engine import LLMEngine
+from qwen3_from_scratch.inference.llm.async_llm import AsyncLLM
+from qwen3_from_scratch.inference.llm.llm_base import GenerateParams
+
 import asyncio
 from pathlib import Path
 
 async def main():
-    engine = LLMEngine(Path("examples/configs/batch2_example.yaml"), "qwen3-0.6b")
-    async for delta in engine.generate_stream([{"role": "user", "content": "介绍一下自己"}]):
-        print(delta, end='')
-    engine.close()
+    engine = AsyncLLM("config.yaml", "qwen3-0.6b")
+    await engine.warmup()
+    async for chunk in engine.generate_stream(
+        [{"role": "user", "content": "介绍一下自己"}],
+        GenerateParams(max_new_tokens=400, ignore_eos=True),
+    ):
+        print(chunk.delta, end="")
+    await engine.close()
 
 if __name__ == '__main__':
     asyncio.run(main())
@@ -56,7 +62,7 @@ if __name__ == '__main__':
 运行前先将 `examples/configs/batch2_example.yaml` 中的 `path` 改成你自己的模型下载路径（也可参考其中的多模型配置方法），然后执行：
 
 ```bash
-uv run examples/llm_runner.py
+uv run examples/async_llm_example.py
 ```
 
 要点说明：
@@ -70,7 +76,7 @@ uv run examples/llm_runner.py
 `examples/llm_example.py` 使用 `LLM` 类（位于 `qwen3_from_scratch.inference.engine.llm`），这是比 `LLMEngine` 更轻量的同步 API。它将 `EngineCore` 与 `InProcClient` 封装在一起，所有推理逻辑在当前进程完成，无需额外的异步协程或后台进程：
 
 ```python
-from qwen3_from_scratch.inference.engine.llm import LLM
+from qwen3_from_scratch.inference.llm.llm import LLM
 
 llm = LLM("examples/configs/batch2.yaml", "qwen3-0.6b")
 llm.warmup()

@@ -1,11 +1,11 @@
-import time
+from dataclasses import dataclass
+from typing import Any
 
 from qwen3_from_scratch.factory import BatchConfig, load_batch_config
 from qwen3_from_scratch.inference.engine.entities import EngineStepOutput
+from qwen3_from_scratch.inference.engine.metrics import Metric
 from qwen3_from_scratch.inference.model_manager import ModelManager
 from qwen3_from_scratch.utils.logger import get_logger
-
-from .metrics import Metric
 
 logger = get_logger(__name__)
 
@@ -16,6 +16,15 @@ class RequestRecord:
         self.token_ids: list[int] = []
         self.finished = False
         self.num_prompts = num_prompts
+
+
+@dataclass
+class GenerateParams:
+    max_new_tokens: int | None = None
+    tools: list[dict] | None = None
+    tool_choice: str | dict | None = None
+    enable_thinking: bool | None = None
+    ignore_eos: bool = False
 
 
 class LLMBase:
@@ -50,15 +59,24 @@ class LLMBase:
             for req_id in req_ids
         )
 
+    def _build_template_kwargs(self, params: GenerateParams) -> dict:
+        template_kwargs: dict[str, Any] = {"add_generation_prompt": True}
+        if params.tools is not None:
+            template_kwargs["tools"] = params.tools
+        if params.tool_choice is not None:
+            template_kwargs["tool_choice"] = params.tool_choice
+        if params.enable_thinking is not None:
+            template_kwargs["enable_thinking"] = params.enable_thinking
+        return template_kwargs
+
     def _tokenize(
-        self, prompt: str | list[dict], **template_kwargs
+        self, prompt: str | list[dict], params: GenerateParams
     ) -> list[int]:
         if isinstance(prompt, list):
             text = self.tokenizer.apply_chat_template(
                 prompt,
                 tokenize=False,
-                add_generation_prompt=True,
-                **template_kwargs,
+                **self._build_template_kwargs(params),
             )
             return self.tokenizer(text).input_ids
         return self.tokenizer(prompt).input_ids

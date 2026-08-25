@@ -42,7 +42,6 @@ class EngineCore:
             ),
             check_seq_finish_func=self._check_seq_finish,
         )
-        self._shutdown_flag = False
 
     def _check_seq_finish(self, seq: Sequence) -> bool:
         eos_ids = self.eos_token_id
@@ -83,3 +82,7 @@ class EngineCore:
         return (len(self.scheduler.waiting) > 0) or (
             len(self.scheduler.active) > 0
         )
+
+    @property
+    def num_blocks(self) -> int:
+        return self.worker.kv_cache.num_pages
