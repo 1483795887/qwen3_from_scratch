@@ -1,4 +1,5 @@
-from qwen3_from_scratch.inference.engine.llm import LLM
+from qwen3_from_scratch.inference.llm.llm import LLM
+from qwen3_from_scratch.inference.llm.llm_base import GenerateParams
 
 
 def get_config_path():
@@ -14,7 +15,7 @@ def main():
     print(
         llm.generate(
             [{"role": "user", "content": "介绍一下你自己"}],
-            enable_thinking=True,
+            GenerateParams(enable_thinking=True),
         )
     )
 
