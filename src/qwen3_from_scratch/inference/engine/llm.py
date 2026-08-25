@@ -62,5 +62,6 @@ class LLM(LLMBase):
             self.decode(req_id, self.records[req_id].token_ids)
             for req_id in all_reqs
         ]
-
+        for req_id in pending_reqs:
+            self.remove_req_record(req_id)
         return result
