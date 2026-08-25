@@ -10,16 +10,16 @@
 单请求推理引擎，继承自原 `InferenceEngine`。使用 BHSD 张量布局、`PreAllocatedKVCache`、SDPA/Triton flash attention。接口：`prefill` / `step` / `generate` / `generate_stream`。
 _Avoid_: InferenceEngine, InferenceSession
 
-**LLMEngine**:
-高层异步推理引擎，面向调用方。内部驱动后台 `threading.Thread`（调度循环）+ `mp.Process`（`ModelWorker`）+ `Scheduler` + `PagedKVCache` 完成多请求推理。接口：`generate_stream`（async，yield `StreamChunk`）/ `close`。调度循环本体由共享 `SchedulerDriver` 提供（见「调度」节）。
-_Avoid_: InferenceEngine, Engine, LLMServer
+**AsyncLLM**:
+高层异步推理引擎，面向调用方。内部驱动后台 `mp.Process`（`EngineCoreProc`，含 `EngineCore` + `Scheduler` + `PagedKVCache`）+ ZMQ PUSH/PULL IPC 完成多请求推理。接口：`generate_stream`（async，yield `StreamChunk`）/ `warmup` / `close`。
+_Avoid_: InferenceEngine, Engine, LLMServer, LLMEngine（已废弃）
 
-**SyncEngine**:
-进程内同步推理引擎，带连续批处理。与服务路径共享 `SchedulerDriver` + `ModelWorker` 调度/推理组件，但模型在当前进程加载推理，无运行线程、无子进程。接口全部同步：`generate_stream`（sync generator，yield `StreamChunk`）/ `generate` / `batch_generate` / `warmup`。无需 `close`，python 进程结束即自然退出。
-_Avoid_: LocalEngine, DirectEngine, SyncLLMEngine
+**LLM**:
+进程内同步推理引擎，封装 `EngineCore` 与 `InProcClient`，所有推理逻辑在当前进程完成。接口全部同步：`generate` / `batch_generate` / `warmup`。无需 `close`，python 进程结束即自然退出。
+_Avoid_: LocalEngine, DirectEngine, SyncLLMEngine, SyncEngine（已废弃）
 
 **BatchRunner**:
-单请求 Batch 模式引擎（保留作 `examples/basic_generation.py` 的简单示例）。使用 BHSD 张量布局、`PreAllocatedKVCache`、SDPA/Triton flash attention，不兼容 `paged_attn` 组件，不走 Packed/批处理路径。新功能以 `SyncEngine` / `LLMEngine` 为准。
+单请求 Batch 模式引擎（保留作 `examples/basic_generation.py` 的简单示例）。使用 BHSD 张量布局、`PreAllocatedKVCache`、SDPA/Triton flash attention，不兼容 `paged_attn` 组件，不走 Packed/批处理路径。新功能以 `LLM` / `AsyncLLM` 为准。
 _Avoid_: InferenceEngine, InferenceSession
 
 **PackedRunner**:
@@ -56,7 +56,7 @@ _Avoid_: block pool, page table（这些是实现细节，不是领域术语）
 `PackedRunner` 的调度器。管理请求队列，决定每步处理哪些请求（prefill/decode/分段 prefill），构建 `StepMetadata`。
 
 **SchedulerDriver**:
-共享调度驱动。封装「入队新序列 → `Scheduler.schedule()` → worker 推理 → `post_process` 回填」的调度循环本体，`LLMEngine`（进程路径，`worker_forward` 走 `mp.Queue` 往返）与 `SyncEngine`（进程内直调 `ModelWorker.forward`）共用。`worker_forward` 约定：`list[Sequence] → list[int]`。
+共享调度驱动。封装「入队新序列 → `Scheduler.schedule()` → worker 推理 → `post_process` 回填」的调度循环本体，供旧 `LLMEngine`（进程路径，`worker_forward` 走 `mp.Queue` 往返）与旧 `SyncEngine`（进程内直调 `ModelWorker.forward`）共用。新架构中 `AsyncLLM` 使用 `EngineCoreProc`（子进程内置调度循环），`LLM` 使用 `InProcClient` 直接驱动 `EngineCore.step()`，均不再依赖 `SchedulerDriver`。
 _Avoid_: EngineLoop, Driver（太宽）, SyncLoop
 
 **StepMetadata**:
@@ -107,19 +107,19 @@ _Avoid_: BatchConfig（两种配置各自独立）
 ### 性能指标
 
 **StreamChunk**:
-`LLMEngine.generate_stream` 的 yield 单元。包含 `delta`（解码文本片段）和 `metrics`（`PerfMetrics` 快照）。替代原先直接 yield `str` 的接口。
-_Avoid_: RequestResult（内部消息传递单元，不暴露给调用方）, Chunk, TokenResult
+`AsyncLLM.generate_stream` 的 yield 单元。包含 `delta`（解码文本片段）、`req_id`、`prompt_tokens`、`generated_tokens`。
+_Avoid_: RequestResult（旧 LLMEngine 内部消息传递单元，已废弃）, Chunk, TokenResult
 
 **PerfMetrics**:
-单次请求的运行时性能指标快照，每个 chunk 更新。字段：`ttft`（首词延迟，秒）、`token_count`（已生成 token 数）、`tps`（解码阶段 running 平均 tokens/sec）、`total_elapsed`（从 `generate_stream` 调用到此 chunk 的总耗时，秒）。全部基于 consumer 侧 wall-clock 测量。
+单次请求的运行时性能指标快照（旧 `LLMEngine` / `SyncEngine` 使用，随旧文件一起删除，未来可在新架构下重新引入）。字段：`ttft`（首词延迟，秒）、`token_count`（已生成 token 数）、`tps`（解码阶段 running 平均 tokens/sec）、`total_elapsed`（从 `generate_stream` 调用到此 chunk 的总耗时，秒）。全部基于 consumer 侧 wall-clock 测量。
 _Avoid_: PerfStats, Metrics, TimingInfo
 
 **BatchPerfMetrics**:
-`SyncEngine.batch_generate` 返回的批量汇总指标。含 `per_request`（每请求 `PerfMetrics`，顺序与输入一致）、`num_requests`、`total_tokens`、`total_elapsed`（最后一个请求结束时间 - 批量调用开始时间）、`aggregate_tps`（`total_tokens / total_elapsed`，整批吞吐）。
+旧 `SyncEngine.batch_generate` 返回的批量汇总指标（随旧文件一起删除，未来可在新架构下重新引入）。含 `per_request`（每请求 `PerfMetrics`，顺序与输入一致）、`num_requests`、`total_tokens`、`total_elapsed`（最后一个请求结束时间 - 批量调用开始时间）、`aggregate_tps`（`total_tokens / total_elapsed`，整批吞吐）。
 _Avoid_: BatchMetrics, PerfSummary
 
 **Wall-clock TTFT**:
-从调用方发出请求到收到第一个 `StreamChunk.delta` 的时间。服务路径（LLMEngine）包含 asyncio Queue 排队、tokenize、Scheduler 等待、`mp.Queue` 序列化传输、GPU prefill 计算、回传的全部开销；同步路径（SyncEngine）无 IPC，主要是 tokenize + Scheduler + GPU prefill。均为调用方真实感受到的延迟。
+从调用方发出请求到收到第一个 `StreamChunk.delta` 的时间。异步路径（AsyncLLM）包含 asyncio Queue 排队、tokenize、Scheduler 等待、ZMQ IPC、GPU prefill 计算、回传的全部开销；同步路径（LLM）无 IPC，主要是 tokenize + Scheduler + GPU prefill。均为调用方真实感受到的延迟。
 _Avoid_: Compute TTFT（仅 Worker 进程内的纯计算时间，本项目不采集）, Prefill time
 
 **Effective TPS**:

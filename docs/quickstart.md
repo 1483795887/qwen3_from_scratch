@@ -73,7 +73,7 @@ uv run examples/async_llm_example.py
 
 ### llm_example 使用
 
-`examples/llm_example.py` 使用 `LLM` 类（位于 `qwen3_from_scratch.inference.engine.llm`），这是比 `LLMEngine` 更轻量的同步 API。它将 `EngineCore` 与 `InProcClient` 封装在一起，所有推理逻辑在当前进程完成，无需额外的异步协程或后台进程：
+`examples/llm_example.py` 使用 `LLM` 类（位于 `qwen3_from_scratch.inference.llm.llm`），这是比 `AsyncLLM` 更轻量的同步 API。它将 `EngineCore` 与 `InProcClient` 封装在一起，所有推理逻辑在当前进程完成，无需额外的异步协程或后台进程：
 
 ```python
 from qwen3_from_scratch.inference.llm.llm import LLM
@@ -100,4 +100,4 @@ uv run examples/llm_example.py
 - `LLM(config_path, model_name)` 在构造时加载配置并初始化分词器，`model_name` 必须存在于配置的 `models` 列表中
 - `warmup()` 会执行一次短生成（默认 3 个 token），用于 CUDA 图编译与显存分配
 - `generate()` 接收字符串或 OpenAI 风格的 message 列表，`enable_thinking` 等参数会透传给 `apply_chat_template`
-- 与 `LLMEngine` 不同，`LLM` 内部使用 `InProcClient` 驱动 `EngineCore`，所有操作同步阻塞，适用于简单脚本与调试场景
+- 与 `AsyncLLM` 不同，`LLM` 内部使用 `InProcClient` 驱动 `EngineCore`，所有操作同步阻塞，适用于简单脚本与调试场景
