@@ -8,7 +8,7 @@ def get_config_path():
 
 
 def main():
-    llm = LLM(get_config_path(), "qwen3-0.6b")
+    llm = LLM(get_config_path(), "qwen3-0.6b", log_interval=10)
     llm.warmup()
 
     print(
@@ -17,6 +17,15 @@ def main():
             enable_thinking=True,
         )
     )
+
+    for res in llm.batch_generate(
+        [
+            [{"role": "user", "content": "介绍一下你自己"}],
+            [{"role": "user", "content": "你有哪些技能"}],
+            [{"role": "user", "content": "1+1等于几"}],
+        ]
+    ):
+        print(res)
 
 
 if __name__ == "__main__":
