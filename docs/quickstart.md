@@ -28,6 +28,7 @@ cp .env.example .env
 
 ![pics](../pics/basic_generation.png)
 
+- [examples/llm_example.py](../examples/llm_example.py)，基于 `LLM` 类的高层同步 API，封装了 `EngineCore` 与 `InProcClient`，开箱即用，详见下方 [llm_example 使用](#llm_example-使用)
 - [examples/llm_runner.py](../examples/llm_runner.py)，基于 `LLMEngine` 的推理引擎示例，支持流式生成与多模型批量配置
 - [examples/server.py](../examples/server.py)，OpenAI 兼容 API 服务器，详见 [使用样本](examples.md)
 
@@ -63,3 +64,34 @@ uv run examples/llm_runner.py
 - `generate_stream` 接收 OpenAI 风格的消息列表，内部会经 `apply_chat_template` 转换为模型输入
 - 多模型通过配置文件的 `models` 列表声明，每个模型可单独指定 `device`、`dtype`、`components` 与 `generation` 覆盖项
 - 使用完毕后调用 `engine.close()` 结束后台推理进程
+
+### llm_example 使用
+
+`examples/llm_example.py` 使用 `LLM` 类（位于 `qwen3_from_scratch.inference.engine.llm`），这是比 `LLMEngine` 更轻量的同步 API。它将 `EngineCore` 与 `InProcClient` 封装在一起，所有推理逻辑在当前进程完成，无需额外的异步协程或后台进程：
+
+```python
+from qwen3_from_scratch.inference.engine.llm import LLM
+
+llm = LLM("examples/configs/batch2.yaml", "qwen3-0.6b")
+llm.warmup()
+
+print(
+    llm.generate(
+        [{"role": "user", "content": "介绍一下你自己"}],
+        enable_thinking=True,
+    )
+)
+```
+
+运行前先将 `examples/configs/batch2.yaml` 中的 `path` 改成你自己的模型下载路径，然后执行：
+
+```bash
+uv run examples/llm_example.py
+```
+
+要点说明：
+
+- `LLM(config_path, model_name)` 在构造时加载配置并初始化分词器，`model_name` 必须存在于配置的 `models` 列表中
+- `warmup()` 会执行一次短生成（默认 3 个 token），用于 CUDA 图编译与显存分配
+- `generate()` 接收字符串或 OpenAI 风格的 message 列表，`enable_thinking` 等参数会透传给 `apply_chat_template`
+- 与 `LLMEngine` 不同，`LLM` 内部使用 `InProcClient` 驱动 `EngineCore`，所有操作同步阻塞，适用于简单脚本与调试场景

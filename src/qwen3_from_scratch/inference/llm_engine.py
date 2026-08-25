@@ -8,7 +8,7 @@ from dataclasses import dataclass
 from uuid import uuid4
 
 from qwen3_from_scratch.factory import BatchConfig, load_batch_config
-from qwen3_from_scratch.inference.logger import get_logger
+from qwen3_from_scratch.utils.logger import get_logger
 from qwen3_from_scratch.inference.model_manager import ModelManager
 from qwen3_from_scratch.inference.model_worker import ModelWorker
 from qwen3_from_scratch.inference.scheduler import Scheduler, SchedulerConfig
