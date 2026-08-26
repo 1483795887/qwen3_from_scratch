@@ -36,11 +36,8 @@ from fastapi_openai_compat import (
     create_openai_router,
 )
 
-from qwen3_from_scratch.inference.llm_engine import (
-    LLMEngine,
-    PerfMetrics,
-    StreamChunk,
-)
+from qwen3_from_scratch.inference.llm.async_llm import AsyncLLM, StreamChunk
+from qwen3_from_scratch.inference.llm.llm_base import GenerateParams
 from qwen3_from_scratch.utils.logger import get_logger
 
 logger = get_logger(__name__)
@@ -179,16 +176,11 @@ class FakeEngine:
         logger.info("warmup")
 
     async def generate_stream(
-        self,
-        messages: list[dict],
-        max_new_tokens: int | None = None,
-        tools: list[dict] | None = None,
-        tool_choice: str | dict | None = None,
-        enable_thinking: bool | None = None,
+        self, messages: list[dict], params: GenerateParams
     ) -> AsyncGenerator[StreamChunk, None]:
-        if tools:
+        if params.tools:
             # 模拟一次工具调用：逐块吐出 TOOL_CALL_OPEN / JSON / TOOL_CALL_CLOSE
-            first = tools[0]
+            first = params.tools[0]
             fn = (
                 first.get("function", first) if isinstance(first, dict) else {}
             )
@@ -202,13 +194,13 @@ class FakeEngine:
                 " " + payload + " ",
                 TOOL_CALL_CLOSE,
             ]:
-                yield StreamChunk(piece, PerfMetrics(0, 0, 0, 0))
+                yield StreamChunk(piece)
             return
         content = "hello world"
         for c in content.split():
-            yield StreamChunk(c, PerfMetrics(0, 0, 0, 0))
+            yield StreamChunk(c)
 
-    def close(self):
+    async def close(self):
         pass
 
 
@@ -220,7 +212,7 @@ async def lifespan(
     use_real_model: bool = False,
 ):
     engine = (
-        LLMEngine(config_path, model_name)
+        AsyncLLM(config_path, model_name)
         if use_real_model
         else FakeEngine(config_path, model_name)
     )
@@ -229,7 +221,7 @@ async def lifespan(
     app.state.engine = engine
     yield
     app.state.engine = None
-    engine.close()
+    await engine.close()
 
 
 def create_app(config_path: str, model_name: str, use_real_model: bool):
@@ -261,7 +253,9 @@ def create_app(config_path: str, model_name: str, use_real_model: bool):
             usage=usage,
         )
 
-    def _build_engine_stream(model: str, messages: list[dict], body: dict):
+    def _build_engine_stream(
+        model: str, messages: list[dict], body: dict
+    ) -> AsyncGenerator[StreamChunk, None]:
         tools = body.get("tools")
         tool_choice = body.get("tool_choice")
         max_tokens = body.get("max_tokens")
@@ -275,11 +269,13 @@ def create_app(config_path: str, model_name: str, use_real_model: bool):
             enable_thinking = ctk["enable_thinking"]
         return app.state.engine.generate_stream(
             messages,
-            max_new_tokens=max_tokens,
-            tools=tools,
-            tool_choice=tool_choice,
-            enable_thinking=enable_thinking,
-            ignore_eos=body.get("ignore_eos", False),
+            GenerateParams(
+                max_new_tokens=max_tokens,
+                tools=tools,
+                tool_choice=tool_choice,
+                enable_thinking=enable_thinking,
+                ignore_eos=body.get("ignore_eos", False),
+            ),
         )
 
     async def completions(
@@ -303,24 +299,17 @@ def create_app(config_path: str, model_name: str, use_real_model: bool):
         has_tool_calls = False
         tool_index = 0
         gen = _build_engine_stream(model, messages, body)
-        tok_seq = 0  # 引擎侧 token 序号（含被 parser 吞掉的 marker token）
-        chunk_seq = 0  # 实际 yield 的 chunk 序号（与客户端一一对应）
-        last_metrics = None
-        last_prompt_tokens = 0
+        last_item: StreamChunk | None = None
         async for item in gen:
-            last_metrics = item.metrics
-            last_prompt_tokens = item.prompt_tokens
-            tok_seq += 1
+            last_item = item
             for ev in parser.feed(item.delta):
                 if ev.kind == "content" and ev.text:
-                    chunk_seq += 1
                     yield _chunk(
                         resp_id,
                         model,
                         delta=Message(role="assistant", content=ev.text),
                     )
                 elif ev.kind == "reasoning" and ev.text:
-                    chunk_seq += 1
                     yield _chunk(
                         resp_id,
                         model,
@@ -333,7 +322,6 @@ def create_app(config_path: str, model_name: str, use_real_model: bool):
                 elif ev.kind == "tool_call":
                     has_tool_calls = True
                     tc = ev.tool_call
-                    chunk_seq += 1
                     yield _chunk(
                         resp_id,
                         model,
@@ -358,14 +346,14 @@ def create_app(config_path: str, model_name: str, use_real_model: bool):
         finish_reason = "tool_calls" if has_tool_calls else "stop"
         # 末尾 chunk 带 usage：evalscope 优先用 usage.completion_tokens 统计
         # output tokens（否则 fallback 只数 content，think 块被漏数 → 470<512）
-        completion_tokens = last_metrics.token_count if last_metrics else 0
+        completion_tokens = last_item.generated_tokens if last_item else 0
         usage = (
             {
-                "prompt_tokens": last_prompt_tokens,
+                "prompt_tokens": last_item.prompt_tokens,
                 "completion_tokens": completion_tokens,
-                "total_tokens": last_prompt_tokens + completion_tokens,
+                "total_tokens": last_item.prompt_tokens + completion_tokens,
             }
-            if last_metrics
+            if last_item
             else None
         )
         yield _chunk(

@@ -1,8 +1,13 @@
-import time
+from dataclasses import dataclass
+from typing import Any
 
 from qwen3_from_scratch.factory import BatchConfig, load_batch_config
 from qwen3_from_scratch.inference.engine.entities import EngineStepOutput
+from qwen3_from_scratch.inference.engine.metrics import Metric
 from qwen3_from_scratch.inference.model_manager import ModelManager
+from qwen3_from_scratch.utils.logger import get_logger
+
+logger = get_logger(__name__)
 
 
 class RequestRecord:
@@ -10,9 +15,16 @@ class RequestRecord:
         self.req_id = req_id
         self.token_ids: list[int] = []
         self.finished = False
-        self.added_time = time.time()
-        self.first_token_time = None
         self.num_prompts = num_prompts
+
+
+@dataclass
+class GenerateParams:
+    max_new_tokens: int | None = None
+    tools: list[dict] | None = None
+    tool_choice: str | dict | None = None
+    enable_thinking: bool | None = None
+    ignore_eos: bool = False
 
 
 class LLMBase:
@@ -29,13 +41,17 @@ class LLMBase:
         self.eos = self.tokenizer.eos_token_id
         self.step_count = 0
         self.records: dict[str, RequestRecord] = {}
+        self.metrics = Metric()
 
     def record_req(self, req_id: str, num_prompts: int):
         self.records[req_id] = RequestRecord(req_id, num_prompts)
+        self.metrics.on_new_records(req_id, num_prompts)
 
     def remove_req_record(self, req_id: str):
-        if req_id in self.records:
-            del self.record_req[req_id]
+        record_keys = list(self.records.keys())
+        if req_id in record_keys:
+            del self.records[req_id]
+        self.metrics.on_remove_record(req_id)
 
     def is_all_finished(self, req_ids: set[str]):
         return all(
@@ -43,15 +59,24 @@ class LLMBase:
             for req_id in req_ids
         )
 
+    def _build_template_kwargs(self, params: GenerateParams) -> dict:
+        template_kwargs: dict[str, Any] = {"add_generation_prompt": True}
+        if params.tools is not None:
+            template_kwargs["tools"] = params.tools
+        if params.tool_choice is not None:
+            template_kwargs["tool_choice"] = params.tool_choice
+        if params.enable_thinking is not None:
+            template_kwargs["enable_thinking"] = params.enable_thinking
+        return template_kwargs
+
     def _tokenize(
-        self, prompt: str | list[dict], **template_kwargs
+        self, prompt: str | list[dict], params: GenerateParams
     ) -> list[int]:
         if isinstance(prompt, list):
             text = self.tokenizer.apply_chat_template(
                 prompt,
                 tokenize=False,
-                add_generation_prompt=True,
-                **template_kwargs,
+                **self._build_template_kwargs(params),
             )
             return self.tokenizer(text).input_ids
         return self.tokenizer(prompt).input_ids
@@ -65,7 +90,20 @@ class LLMBase:
         for output in step_outputs:
             assert output.req_id in self.records
             record = self.records[output.req_id]
-            if record.first_token_time is None:
-                record.first_token_time = time.time()
             record.token_ids.extend(output.new_token_ids)
             record.finished = output.finished
+        self.metrics.on_step_output(step_outputs)
+        self._may_log()
+
+    def _may_log(self):
+        if self.log_interval <= 0:
+            return
+        if self.step_count % self.log_interval != 0:
+            return
+        logger.info(
+            "step=%d TTFT=%.4fs TPS=%f/s RPS=%f/s",
+            self.step_count,
+            self.metrics.ttft,
+            self.metrics.tps,
+            self.metrics.rps,
+        )
