@@ -17,7 +17,7 @@ from qwen3_from_scratch.inference.context import (
 from qwen3_from_scratch.inference.kv_cache.pre_allocated_kv_cache import (
     PreAllocatedKVCache,
 )
-from qwen3_from_scratch.inference.model_loader import ModelLoader
+from qwen3_from_scratch.inference.model_runner.model_loader import ModelLoader
 from qwen3_from_scratch.inference.sampler import (
     GreedySampler,
     Sampler,

@@ -1,6 +1,6 @@
 from qwen3_from_scratch.factory import BatchConfig
 from qwen3_from_scratch.inference.engine.entities import EngineStepOutput
-from qwen3_from_scratch.inference.model_worker import ModelWorker
+from qwen3_from_scratch.inference.model_runner.model_worker import ModelWorker
 from qwen3_from_scratch.inference.scheduler import Scheduler, SchedulerConfig
 from qwen3_from_scratch.inference.sequence import Sequence, SequenceStatus
 from qwen3_from_scratch.utils.logger import get_logger

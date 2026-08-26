@@ -1,8 +1,8 @@
 from transformers import AutoTokenizer
 
 from qwen3_from_scratch.factory import BatchConfig
+from qwen3_from_scratch.inference.model_runner.model_loader import ModelLoader
 from qwen3_from_scratch.utils.logger import get_logger
-from qwen3_from_scratch.inference.model_loader import ModelLoader
 
 logger = get_logger(__name__)
 

@@ -13,9 +13,11 @@ from qwen3_from_scratch.inference import (
     set_forward_context,
 )
 from qwen3_from_scratch.inference.kv_cache.paged_cache import PagedKVCache
-from qwen3_from_scratch.utils.logger import get_logger
-from qwen3_from_scratch.inference.model_manager import ModelManager
+from qwen3_from_scratch.inference.model_runner.model_manager import (
+    ModelManager,
+)
 from qwen3_from_scratch.inference.sequence import Sequence
+from qwen3_from_scratch.utils.logger import get_logger
 
 logger = get_logger(__name__)
 

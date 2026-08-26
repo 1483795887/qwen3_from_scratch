@@ -1,7 +1,7 @@
 import torch
 
 from qwen3_from_scratch.inference.context import get_forward_context
-from qwen3_from_scratch.inference.model_worker import ModelWorker
+from qwen3_from_scratch.inference.model_runner.model_worker import ModelWorker
 from qwen3_from_scratch.inference.sequence import Sequence
 
 
