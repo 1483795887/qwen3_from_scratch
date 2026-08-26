@@ -13,7 +13,26 @@ from qwen3_from_scratch.inference.kv_cache.pre_allocated_kv_cache import (
     PreAllocatedKVCache,
 )
 from qwen3_from_scratch.models.attn import create_causal_attention_mask
-from qwen3_from_scratch.models.rotary import get_rope
+from qwen3_from_scratch.models.rotary import build_cos_sin_table, get_rope
+
+
+def _setup_cos_sin_from_table(
+    context: ModelContext,
+    model_config,
+    position_ids: torch.Tensor,
+    device,
+    dtype,
+):
+    """按 position_ids 切片最大长度表，填到 context.cos / context.sin。"""
+    head_dim = model_config.head_dim
+    max_pos = model_config.max_position_embeddings
+    base = model_config.pos_embed_params["rope_theta"]
+    cos_table, sin_table = build_cos_sin_table(
+        head_dim, max_pos, base, device, dtype
+    )
+    pos_flat = position_ids.reshape(-1).long()
+    context.cos = cos_table[pos_flat]
+    context.sin = sin_table[pos_flat]
 
 
 def _get_cos_sin_for_hf(model_config, position_ids, device, dtype):
@@ -53,8 +72,12 @@ def test_self_attn_shape_correct(model_config, component_type, device):
     x = torch.randn(
         2, n_seq, model_config.hidden_size, dtype=torch.bfloat16
     ).to(device)
+    position_ids = torch.arange(0, n_seq).view(1, -1).to(device)
     context = ModelContext()
-    context.position_ids = torch.arange(0, n_seq).view(1, -1).to(device)
+    context.position_ids = position_ids
+    _setup_cos_sin_from_table(
+        context, model_config, position_ids, device, x.dtype
+    )
     set_forward_context(context)
     with torch.no_grad():
         out = self_attn(x)
@@ -73,7 +96,11 @@ def test_self_attn_shape_correct_with_kv_cache(
         component_impl=component_type,
     ).to(device)
     context = ModelContext()
-    context.position_ids = torch.arange(100, 101).view(1, -1).to(device)
+    position_ids = torch.arange(100, 101).view(1, -1).to(device)
+    context.position_ids = position_ids
+    _setup_cos_sin_from_table(
+        context, model_config, position_ids, device, torch.float32
+    )
     cache_k = torch.randn(
         2, 100, model_config.num_key_value_heads, model_config.head_dim
     ).to(device)
@@ -103,8 +130,12 @@ def test_self_attn_output_close_to_transformers(
     with torch.no_grad():
         torch.manual_seed(42)
         x = torch.randn(2, 256, model_config.hidden_size).to(device)
+        position_ids = torch.arange(0, 256).view(1, -1).to(device)
         context = ModelContext()
-        context.position_ids = torch.arange(0, 256).view(1, -1).to(device)
+        context.position_ids = position_ids
+        _setup_cos_sin_from_table(
+            context, model_config, position_ids, device, x.dtype
+        )
         set_forward_context(context)
         output = self_attn(x)
         cos_hf, sin_hf = _get_cos_sin_for_hf(
@@ -135,7 +166,11 @@ def test_self_attn_output_close_to_transformers_with_kv_cache(
     off_self_attn.load_state_dict(self_attn.state_dict())
     past_key_values = DynamicCache(config=qwen3_config)
     context = ModelContext()
-    context.position_ids = torch.arange(100, 101).view(1, -1).to(device)
+    position_ids = torch.arange(100, 101).view(1, -1).to(device)
+    context.position_ids = position_ids
+    _setup_cos_sin_from_table(
+        context, model_config, position_ids, device, torch.float32
+    )
     cache_k = torch.randn(
         2, 100, model_config.num_key_value_heads, model_config.head_dim
     ).to(device)
@@ -307,6 +342,18 @@ def test_paged_self_attn_var_len_shape(model_config, device):
         cum_seq_lens_kv=cum_seq_lens.clone(),
         slot_mapping=slot_mapping,
     )
+    # cos/sin 直接切片最大长度表（引擎侧生产路径）
+    head_dim = model_config.head_dim
+    base = model_config.pos_embed_params["rope_theta"]
+    cos_full, sin_full = build_cos_sin_table(
+        head_dim,
+        model_config.max_position_embeddings,
+        base,
+        device,
+        x.dtype,
+    )
+    context.cos = cos_full[position_ids.long()]
+    context.sin = sin_full[position_ids.long()]
     set_forward_context(context)
     with torch.no_grad():
         out = paged_attn(x)
@@ -374,6 +421,9 @@ def test_paged_self_attn_var_len_prefill(model_config, qwen3_config, device):
         cum_seq_lens_kv=cum_seq_lens.clone(),
         slot_mapping=slot_mapping,
     )
+    # cos/sin: 用 _build_rope_table 已建表，按 position_ids 切片填 context
+    context.cos = cos_table[position_ids]
+    context.sin = sin_table[position_ids]
     set_forward_context(context)
     with torch.no_grad():
         output = paged_attn(x)
@@ -473,6 +523,8 @@ def test_paged_self_attn_var_len_decode(model_config, qwen3_config, device):
         cum_seq_lens_kv=existing_cum.clone(),
         slot_mapping=existing_slot_mapping,
     )
+    prefill_ctx.cos = cos_table[existing_pos_ids]
+    prefill_ctx.sin = sin_table[existing_pos_ids]
     set_forward_context(prefill_ctx)
     with torch.no_grad():
         paged_attn(x_existing)  # 输出不需要，只为填充缓存
@@ -497,6 +549,8 @@ def test_paged_self_attn_var_len_decode(model_config, qwen3_config, device):
         cum_seq_lens_kv=cum_seq_lens_kv,
         slot_mapping=new_slot_mapping,
     )
+    decode_ctx.cos = cos_table[new_pos_ids]
+    decode_ctx.sin = sin_table[new_pos_ids]
     set_forward_context(decode_ctx)
     with torch.no_grad():
         output = paged_attn(x_new)

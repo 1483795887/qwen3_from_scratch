@@ -9,7 +9,6 @@ from qwen3_from_scratch.factory import ComponentFactory, ModelConfig
 from qwen3_from_scratch.inference.context import get_forward_context
 from qwen3_from_scratch.models.common import assign
 from qwen3_from_scratch.models.parameter_loader import ParameterLoader
-from qwen3_from_scratch.models.rotary import get_rope
 
 
 @ComponentFactory.register("self_attn", "base")
@@ -104,32 +103,15 @@ class FusedSelfAttention(nn.Module):
         self.fused_norm_weight = nn.Parameter(torch.ones(2, self.head_dim))
 
     def _get_cos_sin(self, x: torch.Tensor):
-        """从预计算的 RotaryEmbedding 获取 cos/sin，按 position_ids 索引。
+        """直接读 ctx.cos / ctx.sin（引擎侧每步预取，与 CUDA graph capture 兼容）。
 
-        返回 (cos, sin)，各 (N, head_dim)，N = position_ids 的长度。
-        引擎侧（ModelWorker.build_context_*）已每步预取 cos/sin 到 ctx，
-        直接复用；未预取时走旧路径（CPU 索引 cache）。
+        路径固定、不再走 .cpu() 索引；要求 ctx 上 cos/sin 已就绪。
         """
         ctx = get_forward_context()
-        if ctx.cos is not None and ctx.sin is not None:
-            return ctx.cos, ctx.sin
-        assert ctx.position_ids is not None, (
-            "position_ids must be set before forward"
+        assert ctx.cos is not None and ctx.sin is not None, (
+            "context.cos / context.sin must be set before forward"
         )
-        rotary = get_rope(
-            self.head_dim,
-            self.head_dim,
-            self.config.max_position_embeddings,
-            self.config.pos_embed_params["rope_theta"],
-        )
-        pos = ctx.position_ids.reshape(-1).cpu()
-        cos_sin = rotary.cos_sin_cache[pos].to(x.device, x.dtype)
-        half = cos_sin.shape[-1] // 2
-        cos = torch.cat([cos_sin[..., :half], cos_sin[..., :half]], dim=-1)
-        sin = torch.cat([cos_sin[..., half:], cos_sin[..., half:]], dim=-1)
-        cos = cos.squeeze(1)  # (N, D)
-        sin = sin.squeeze(1)
-        return cos, sin
+        return ctx.cos, ctx.sin
 
     def _forward_pytorch(self, x, residual=None):
         ctx = get_forward_context()

@@ -3,7 +3,6 @@ from torch import nn
 
 from qwen3_from_scratch.factory import ComponentFactory, ModelConfig
 from qwen3_from_scratch.inference.context import get_forward_context
-from qwen3_from_scratch.models.rotary import get_rope
 
 
 @ComponentFactory.register("rope", "base")
@@ -25,28 +24,15 @@ class PythonRope(nn.Module):
         return torch.cat((-x2, x1), dim=-1)
 
     def _get_cos_sin(self, x: torch.Tensor):
-        """从预计算的 RotaryEmbedding 获取 cos/sin，按 position_ids 索引。
+        """直接读 ctx.cos / ctx.sin（引擎侧每步预取，与 CUDA graph capture 兼容）。
 
-        cos_sin_cache 结构: cat([cos(freqs), sin(freqs)])，各 head_dim//2。
-        需要扩展为 head_dim 维（cat([cos, cos] 和 [sin, sin]），
-        与旧 build_cos_sin_embed 的 cat([freqs, freqs]) 一致。
+        路径固定、不再走 .cpu() 索引；要求 ctx 上 cos/sin 已就绪。
         """
         ctx = get_forward_context()
-        assert ctx.position_ids is not None, (
-            "position_ids must be set before forward"
+        assert ctx.cos is not None and ctx.sin is not None, (
+            "context.cos / context.sin must be set before forward"
         )
-        rotary = get_rope(
-            self.head_dim, self.head_dim, self.max_seq_len, self.base_freq
-        )
-        pos = ctx.position_ids.reshape(-1).cpu()
-        cos_sin = rotary.cos_sin_cache[pos].to(x.device, x.dtype)
-        half = cos_sin.shape[-1] // 2
-        cos = torch.cat([cos_sin[..., :half], cos_sin[..., :half]], dim=-1)
-        sin = torch.cat([cos_sin[..., half:], cos_sin[..., half:]], dim=-1)
-        # cos_sin_cache 多了 unsqueeze(1) 的中间维度，squeeze 掉
-        cos = cos.squeeze(1)  # (N, head_dim)
-        sin = sin.squeeze(1)
-        return cos, sin
+        return ctx.cos, ctx.sin
 
     def forward(self, x: torch.Tensor):
         cos, sin = self._get_cos_sin(x)
@@ -71,7 +57,8 @@ class PythonRope(nn.Module):
 @ComponentFactory.register("rope", "my_op")
 class MyRope(PythonRope):
     def forward(self, x: torch.Tensor):
-        if self.rope_type == "normal" or not x.is_cuda:
+        # neox_rope 是 triton kernel，只在 CUDA + neox 下走；其他情况落到基类
+        if self.rope_type != "neox" or not x.is_cuda:
             return super().forward(x)
 
         cos, sin = self._get_cos_sin(x)

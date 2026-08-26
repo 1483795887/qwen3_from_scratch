@@ -34,7 +34,7 @@ class EngineCore:
         self.eos_token_id = eos_token_id
 
         self.worker = ModelWorker(config, self.model_name)
-        self.worker.init_context()
+        self.worker.warmup()
 
         self.scheduler = Scheduler(
             build_scheduler_config_from_batch_config(
