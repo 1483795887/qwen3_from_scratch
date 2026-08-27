@@ -290,18 +290,23 @@ def create_app(config_path: str, model_name: str, use_real_model: bool):
         model: str, messages: list[dict], body: dict
     ) -> AsyncGenerator[ChatCompletion, None]:
         resp_id = _gen_id()
-        # 首块：角色（content 用空串而非 None，兼容 evalscope 等客户端拼接）
-        yield _chunk(
-            resp_id, model, delta=Message(role="assistant", content="")
-        )
-
         parser = ToolCallStreamParser()
         has_tool_calls = False
         tool_index = 0
         gen = _build_engine_stream(model, messages, body)
         last_item: StreamChunk | None = None
+        # 首块：角色（content 用空串而非 None，兼容 evalscope 等客户端拼接）。
+        # 与 vLLM 对齐：等引擎首个输出到达再发（vLLM 在 result_generator 首个
+        # RequestOutput 的 first_iteration 里发 role 块），否则客户端把 role
+        # 空块记为 TTFT，测出来的 TTFT 是 HTTP 往返而非真实首 token 时间。
+        role_chunk_sent = False
         async for item in gen:
             last_item = item
+            if not role_chunk_sent:
+                role_chunk_sent = True
+                yield _chunk(
+                    resp_id, model, delta=Message(role="assistant", content="")
+                )
             for ev in parser.feed(item.delta):
                 if ev.kind == "content" and ev.text:
                     yield _chunk(
