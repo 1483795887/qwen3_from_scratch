@@ -139,13 +139,12 @@ class ModelWorker:
             for s in seqs
         ]
         context.block_tables = torch.tensor(
-            padded, device=self.device, dtype=torch.int32, pin_memory=True
+            padded, device=self.device, dtype=torch.int32
         )
         context.slot_mapping = torch.tensor(
             slot_mapping,
             device=self.device,
             dtype=torch.int32,
-            pin_memory=True,
         )
 
     def _build_cos_sin_tables(self) -> tuple[torch.Tensor, torch.Tensor]:
@@ -171,54 +170,63 @@ class ModelWorker:
         # positions 已经是 device tensor (non_blocking HtoD)，直接高级索引
         return self._cos_table[positions], self._sin_table[positions]
 
+    def _should_use_cuda_graph(self, seqs: list[Sequence]):
+        if not torch.cuda.is_available() or (
+            self.device == "cpu" or self.device == torch.device("cpu")
+        ):
+            return False
+        return len(seqs) < ModelWorker.CUDA_GRAPH_MAX_LEN
+
+    def _fill_decode_context(
+        self, seqs: list[Sequence], context: ModelContext
+    ):
+        positions = []
+        context.use_decode_graph = self._should_use_cuda_graph(seqs)
+        context.context_lens = torch.tensor(
+            [len(seq) for seq in seqs], dtype=torch.int32, device=self.device
+        )
+        # decode 每条序列只 query 最后一个 token 的位置
+        for seq in seqs:
+            positions.extend(self._query_positions(seq))
+        context.position_ids = torch.tensor(
+            positions, dtype=torch.int32, device=self.device
+        )
+
+    def _fill_prefill_or_mixed_context(
+        self, seqs: list[Sequence], context: ModelContext
+    ):
+        positions = []
+        context.use_decode_graph = False
+        cum_seq_lens_q = [0]
+        cum_seq_lens_kv = [0]
+        for seq in seqs:
+            positions.extend(self._query_positions(seq))
+            cum_seq_lens_q.append(cum_seq_lens_q[-1] + seq.num_tokens)
+            cum_seq_lens_kv.append(cum_seq_lens_kv[-1] + self._kv_len(seq))
+
+        context.cum_seq_lens_kv = torch.tensor(
+            cum_seq_lens_kv, dtype=torch.int32, device=self.device
+        )
+        context.cum_seq_lens_q = torch.tensor(
+            cum_seq_lens_q, dtype=torch.int32, device=self.device
+        )
+        context.position_ids = torch.tensor(
+            positions, dtype=torch.int32, device=self.device
+        )
+        context.position_ids = torch.tensor(
+            positions, dtype=torch.int32, device=self.device
+        )
+
     def build_context(self, seqs: list[Sequence]):
         """混合 batch 的统一上下文构建（prefill 分段 + decode 共存）。"""
         context = get_forward_context()
         is_pure_decode = all(not seq.is_prefill for seq in seqs)
-        positions = []
         device = self.device
 
-        if (
-            torch.cuda.is_available()
-            and is_pure_decode
-            and len(seqs) < ModelWorker.CUDA_GRAPH_MAX_LEN
-        ):
-            context.use_decode_graph = True
-            context.context_lens = torch.tensor(
-                [len(seq) for seq in seqs],
-                dtype=torch.int32,
-                pin_memory=True,
-            ).cuda(non_blocking=True)
-            # decode 每条序列只 query 最后一个 token 的位置
-            for seq in seqs:
-                positions.extend(self._query_positions(seq))
-            cum_q = [0]
-            cum_kv = [0]
-            for seq in seqs:
-                cum_q.append(cum_q[-1] + seq.num_tokens)
-                cum_kv.append(cum_kv[-1] + self._kv_len(seq))
+        if is_pure_decode:
+            self._fill_decode_context(seqs, context)
         else:
-            context.use_decode_graph = False
-            cum_seq_lens_q = [0]
-            cum_seq_lens_kv = [0]
-            for seq in seqs:
-                positions.extend(self._query_positions(seq))
-                cum_seq_lens_q.append(cum_seq_lens_q[-1] + seq.num_tokens)
-                cum_seq_lens_kv.append(cum_seq_lens_kv[-1] + self._kv_len(seq))
-
-            context.cum_seq_lens_kv = torch.tensor(
-                cum_seq_lens_kv,
-                dtype=torch.int32,
-                pin_memory=True,
-            ).to(device=self.device, non_blocking=True)
-            context.cum_seq_lens_q = torch.tensor(
-                cum_seq_lens_q,
-                dtype=torch.int32,
-                pin_memory=True,
-            ).to(device=self.device, non_blocking=True)
-        context.position_ids = torch.tensor(
-            positions, dtype=torch.int32, pin_memory=True
-        ).to(self.device, non_blocking=True)
+            self._fill_prefill_or_mixed_context(seqs, context)
         self._fill_common_context(context, seqs)
         if device == "cuda":
             context.cos, context.sin = self._slice_cos_sin(
@@ -284,31 +292,27 @@ class ModelWorker:
             model_config.max_position_embeddings
             / self.config.scheduler.block_size,
         )
-        input_ids = torch.zeros(
-            max_bs, dtype=torch.int32, pin_memory=True
-        ).cuda(non_blocking=True)
-        positions = torch.zeros(
-            max_bs, dtype=torch.int32, pin_memory=True
-        ).cuda(non_blocking=True)
+        input_ids = torch.zeros(max_bs, dtype=torch.int32, device=self.device)
+        positions = torch.zeros(max_bs, dtype=torch.int32, device=self.device)
         block_tables = torch.zeros(
-            max_bs,
-            max_num_blocks,
-            dtype=torch.int32,
-            pin_memory=True,
-        ).cuda(non_blocking=True)
-        slot_mappings = (
-            torch.zeros(max_bs, dtype=torch.int32, pin_memory=True)
-        ).cuda(non_blocking=True)
+            max_bs, max_num_blocks, dtype=torch.int32, device=self.device
+        )
+        slot_mappings = torch.zeros(
+            max_bs, dtype=torch.int32, device=self.device
+        )
         # capture 阶段 slot 全填 -1：KV update 核遇到 slot<0 直接 return，
         # 避免 capture 把 token-0 的 k/v 写进真实 KV cache 的前 max_bs 个槽位
         # （这些垃圾数据在块复用/前缀命中场景可能被后续 decode 读到）。
         slot_mappings.fill_(-1)
         context_lens = torch.zeros(
-            max_bs, dtype=torch.int32, pin_memory=True
-        ).cuda(non_blocking=True)
+            max_bs, dtype=torch.int32, device=self.device
+        )
         outputs = torch.zeros(
-            max_bs, model_config.hidden_size, pin_memory=True, dtype=self.dtype
-        ).cuda(non_blocking=True)
+            max_bs,
+            model_config.hidden_size,
+            dtype=self.dtype,
+            device=self.device,
+        )
         # cos/sin 占位：分配 max_bs 缓冲，capture 时按 positions[:bs]=0
         # 切片到 _cos_table / _sin_table 的 position-0 行 (cos=1, sin=0)，
         # 让 RoPE 在 capture 阶段是恒等映射；replay 时由 graph_vars["cos"/"sin"] 覆盖。
