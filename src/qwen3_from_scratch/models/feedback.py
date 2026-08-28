@@ -67,15 +67,13 @@ class MyFeedback(PythonFeedback):
                 simple_swiglu,
             )
 
-            output = torch.empty_like(x)
-            simple_swiglu(
+            return simple_swiglu(
                 x,
-                self.merged_weight,
+                self.up_proj.weight,
+                self.gate_proj.weight,
                 self.down_proj.weight,
-                output,
                 residual=residual,
             )
-            return output
         return super().forward(x, residual=residual)
 
 
