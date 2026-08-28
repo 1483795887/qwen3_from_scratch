@@ -39,6 +39,13 @@ bash exps/run_eval_scope_bench.sh
 
 负载为 **20 并发 × 200 请求**，每条请求 512 input + 512 output tokens，流式输出（`--extra-args '{"ignore_eos":true}'` 保证每条固定输出 512 tokens）。结果输出到 `outputs/<时间戳>/qwen3-0.6b/performance_summary.txt`。
 
+脚本会在开跑前把实验现场存档到 `outputs/<时间戳>/`，用于事后复现每次测速对应的参数与环境（`batch2.yaml` 不入 git，且可能在中途被改过）：
+
+- `batch2.yaml` — 服务端配置副本
+- `git_state.txt` — 当前分支、commit、未提交改动（`git diff`，不含 uv.lock）
+- `nvidia_smi.txt` — GPU 时钟/温度/显存与占用显存的进程（排查孤儿进程干扰）
+- `server_process.txt` — 当时在跑的服务进程及其启动命令（可能为空，如测 vLLM 时）
+
 ## 3. 测本框架
 
 启动方式见 [examples.md](examples.md) 的「OpenAI 兼容服务器」一章，使用真实模型：
