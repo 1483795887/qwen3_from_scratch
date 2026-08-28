@@ -4,7 +4,7 @@ from .context import (
     get_forward_context,
     set_forward_context,
 )
-from .model_loader import ModelLoader
+from .model_runner.model_loader import ModelLoader
 from .sampler import (
     GreedySampler,
     Sampler,

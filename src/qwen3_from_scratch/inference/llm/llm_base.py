@@ -4,7 +4,9 @@ from typing import Any
 from qwen3_from_scratch.factory import BatchConfig, load_batch_config
 from qwen3_from_scratch.inference.engine.entities import EngineStepOutput
 from qwen3_from_scratch.inference.engine.metrics import Metric
-from qwen3_from_scratch.inference.model_manager import ModelManager
+from qwen3_from_scratch.inference.model_runner.model_manager import (
+    ModelManager,
+)
 from qwen3_from_scratch.utils.logger import get_logger
 
 logger = get_logger(__name__)

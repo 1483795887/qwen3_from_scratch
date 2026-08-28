@@ -1,7 +1,7 @@
 import torch
 
 from qwen3_from_scratch.inference.context import get_forward_context
-from qwen3_from_scratch.inference.model_worker import ModelWorker
+from qwen3_from_scratch.inference.model_runner.model_worker import ModelWorker
 from qwen3_from_scratch.inference.sequence import Sequence
 
 
@@ -79,8 +79,7 @@ def test_build_context_full_hit_decode_uses_last_prompt_token():
     worker.build_context([seq])
     context = get_forward_context()
     assert context.position_ids.tolist() == [4]
-    assert context.cum_seq_lens_q.tolist() == [0, 1]
-    assert context.cum_seq_lens_kv.tolist() == [0, 5]
+    assert context.context_lens.tolist() == [5]
     # 全命中时无需写 KV，slot_mapping 为空
     assert context.slot_mapping.numel() == 0
     # 输入是最后一个 prompt token

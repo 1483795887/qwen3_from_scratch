@@ -182,6 +182,64 @@ def flash_attention_intr(
 
 
 @triton.jit
+def flash_attention_decode_intr(
+    data_q,
+    K_ptr,
+    V_ptr,
+    result_o,
+    max_val,
+    dominator,
+    N_KEY,
+    scale,
+    block_tables,
+    BLOCK_SIZE_N: tl.constexpr,
+    PAGE_BLOCK_SIZE: tl.constexpr,
+    NUM_HEADS: tl.constexpr,
+    HEAD_DIM: tl.constexpr,
+):
+    dtype = data_q.dtype
+    for k in tl.range(0, N_KEY, BLOCK_SIZE_N, warp_specialize=True):
+        k = tl.multiple_of(k, BLOCK_SIZE_N)
+        i_end = tl.minimum(N_KEY, k + BLOCK_SIZE_N)
+        offsets_n = k + tl.arange(0, BLOCK_SIZE_N)
+        data_k = load_paged_memory(
+            K_ptr,
+            block_tables,
+            k,
+            i_end,
+            NUM_HEADS,
+            PAGE_BLOCK_SIZE,
+            HEAD_DIM,
+            BLOCK_SIZE_N,
+        )
+        data_v = load_paged_memory(
+            V_ptr,
+            block_tables,
+            k,
+            i_end,
+            NUM_HEADS,
+            PAGE_BLOCK_SIZE,
+            HEAD_DIM,
+            BLOCK_SIZE_N,
+        )
+        attn = tl.dot(data_q, data_k.T) * scale
+        attn = tl.where(offsets_n[None, :] < i_end, attn, -float("inf"))
+        tmp_max = tl.max(attn, axis=-1, keep_dims=True)
+        new_max_val = tl.maximum(max_val, tmp_max)
+        attn = attn - new_max_val
+        exp_attn = tl.math.exp2(attn)
+
+        scale_factor = tl.math.exp2(max_val - new_max_val)
+        dominator = dominator * scale_factor + tl.sum(
+            exp_attn, axis=-1, keep_dims=True
+        )
+        max_val = new_max_val
+        exp_attn = exp_attn.to(dtype)
+        result_o = result_o * scale_factor + tl.dot(exp_attn, data_v)
+    return result_o, max_val, dominator
+
+
+@triton.jit
 def flash_attn_varlen_kernel(
     Q,
     K,
@@ -465,6 +523,91 @@ def flash_attn_varlen_decode_kernel(
     )
 
 
+@triton.jit
+def flash_attn_decode_kernel(
+    Q,
+    K,
+    V,
+    output,
+    context_lens,
+    scale,
+    block_tables,
+    block_tables_stride,
+    NUM_HEADS_KV: tl.constexpr,
+    NUM_HEADS_Q: tl.constexpr,
+    groups: tl.constexpr,
+    HEAD_DIM: tl.constexpr,
+    BLOCK_SIZE_N: tl.constexpr,
+    PAGE_BLOCK_SIZE: tl.constexpr,
+):
+    """decode 特化：GQA 折叠。
+    N长度为1，因果没有效果
+    decode 时所有的Q长度都是1, 于是可以把 Groups 个 头部一起加载, 和同一个组的 KV 相乘
+    """
+    b_id = tl.program_id(1)
+    h_id_kv = tl.program_id(0)  # 按 kv-head 展开
+    result_o = tl.zeros((NUM_HEADS_Q, HEAD_DIM), dtype=tl.float32)
+
+    N_KEY = tl.load(context_lens + b_id)
+
+    HIDDEN_DIM = NUM_HEADS_KV * HEAD_DIM
+    HIDDEN_DIM_Q = groups * HIDDEN_DIM
+    K_ptr = K + h_id_kv * HEAD_DIM
+    V_ptr = V + h_id_kv * HEAD_DIM
+    block_tables = block_tables + b_id * block_tables_stride
+    offsets_qm = tl.arange(0, NUM_HEADS_Q)
+    offsets_qd = tl.arange(0, HEAD_DIM)
+    # 行 → (token, q-head)：token = row//groups、head = kv_id*groups + row%groups。
+    # head 偏移 = kv_id*groups*HEAD_DIM + (row%groups)*HEAD_DIM。
+    head_off = (offsets_qm % groups) * HEAD_DIM
+    tok_off = (offsets_qm // groups) * HIDDEN_DIM_Q
+    group_head_stride = groups * HEAD_DIM
+    # decode 每条序列只有 1 个 token，有效行只有 groups 行（token 0 的 groups 个 q-head）。
+    # 不遮住的话，行 ≥ groups 会读 q[b + row//groups]（越界/跨 batch 元素）并写回
+    # output[b + row//groups]（跨 batch 行写竞态 + 越界写，图重放时偶发乱码 / IMA）。
+    N_ROWS = groups
+    mask_m = offsets_qm[:, None] < N_ROWS
+    mask_d = offsets_qd < HEAD_DIM
+
+    data_q = tl.load(
+        Q
+        + b_id * HIDDEN_DIM_Q
+        + h_id_kv * group_head_stride
+        + (tok_off + head_off)[:, None]
+        + offsets_qd[None, :],
+        mask=mask_m & mask_d,
+        other=0.0,
+    )
+    max_val = tl.zeros((NUM_HEADS_Q, 1), dtype=tl.float32) - float("inf")
+    dominator = tl.zeros((NUM_HEADS_Q, 1), dtype=tl.float32)
+    result_o, max_val, dominator = flash_attention_decode_intr(
+        data_q,
+        K_ptr,
+        V_ptr,
+        result_o,
+        max_val,
+        dominator,
+        N_KEY,
+        scale,
+        block_tables,
+        BLOCK_SIZE_N,
+        PAGE_BLOCK_SIZE,
+        NUM_HEADS_KV,
+        HEAD_DIM,
+    )
+    dtype = Q.dtype.element_ty
+    result_o = (result_o / dominator).to(dtype)
+    tl.store(
+        output
+        + b_id * HIDDEN_DIM_Q
+        + h_id_kv * group_head_stride
+        + (tok_off + head_off)[:, None]
+        + offsets_qd[None, :],
+        result_o,
+        mask=mask_d & mask_m,
+    )
+
+
 def flash_attn_varlen_func(
     q: torch.Tensor,
     k: torch.Tensor,
@@ -561,6 +704,42 @@ def flash_attn_varlen_func(
         PAGE_BLOCK_SIZE,
     )
 
+    return output
+
+
+def flash_attn_decode_func(
+    q: torch.Tensor,
+    k_cache: torch.Tensor,
+    v_cache: torch.Tensor,
+    context_lens: torch.Tensor,
+    softmax_scale: float,
+    block_tables: torch.Tensor,
+):
+    # 内部使用 exp2 减少乘法运算
+    softmax_scale *= math.log2(math.e)
+    bs, H_q, D = q.shape
+    BLOCK_SIZE_N = 32
+    PAGE_BLOCK_SIZE = k_cache.shape[1]
+    H_k = k_cache.shape[2]
+    output = torch.empty_like(q)
+    groups = H_q // H_k
+    grid = [H_k, bs]
+    flash_attn_decode_kernel[grid](
+        q,
+        k_cache,
+        v_cache,
+        output,
+        context_lens,
+        softmax_scale,
+        block_tables,
+        block_tables.shape[1],
+        H_k,
+        H_q,
+        groups,
+        D,
+        BLOCK_SIZE_N,
+        PAGE_BLOCK_SIZE,
+    )
     return output
 
 

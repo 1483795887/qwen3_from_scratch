@@ -290,18 +290,19 @@ def create_app(config_path: str, model_name: str, use_real_model: bool):
         model: str, messages: list[dict], body: dict
     ) -> AsyncGenerator[ChatCompletion, None]:
         resp_id = _gen_id()
-        # 首块：角色（content 用空串而非 None，兼容 evalscope 等客户端拼接）
-        yield _chunk(
-            resp_id, model, delta=Message(role="assistant", content="")
-        )
-
         parser = ToolCallStreamParser()
         has_tool_calls = False
         tool_index = 0
         gen = _build_engine_stream(model, messages, body)
         last_item: StreamChunk | None = None
+        role_chunk_sent = False
         async for item in gen:
             last_item = item
+            if not role_chunk_sent:
+                role_chunk_sent = True
+                yield _chunk(
+                    resp_id, model, delta=Message(role="assistant", content="")
+                )
             for ev in parser.feed(item.delta):
                 if ev.kind == "content" and ev.text:
                     yield _chunk(

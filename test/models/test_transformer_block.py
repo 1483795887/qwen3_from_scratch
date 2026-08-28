@@ -11,6 +11,25 @@ from qwen3_from_scratch.inference.context import (
     set_forward_context,
 )
 from qwen3_from_scratch.models.attn import create_causal_attention_mask
+from qwen3_from_scratch.models.rotary import build_cos_sin_table
+
+
+def _fill_cos_sin(
+    context: ModelContext,
+    model_config,
+    position_ids: torch.Tensor,
+    device,
+    dtype,
+):
+    cos_t, sin_t = build_cos_sin_table(
+        model_config.head_dim,
+        model_config.max_position_embeddings,
+        model_config.pos_embed_params["rope_theta"],
+        device,
+        dtype,
+    )
+    context.cos = cos_t[position_ids.reshape(-1).long()]
+    context.sin = sin_t[position_ids.reshape(-1).long()]
 
 
 @pytest.mark.parametrize("component_type", ["base", "my_op"])
@@ -27,8 +46,10 @@ def test_transformer_block_shape_correct(model_config, component_type, device):
     x = torch.randn(
         2, n_seq, model_config.hidden_size, dtype=torch.bfloat16
     ).to(device)
+    position_ids = torch.arange(0, n_seq).view(1, -1).to(device)
     context = ModelContext()
-    context.position_ids = torch.arange(0, n_seq).view(1, -1).to(device)
+    context.position_ids = position_ids
+    _fill_cos_sin(context, model_config, position_ids, device, x.dtype)
     set_forward_context(context)
     with torch.no_grad():
         output = transformer_block(x)
@@ -59,6 +80,7 @@ def test_transformer_block_output_close_to_transformers(
         position_ids = torch.arange(0, x.shape[1]).view(1, -1).to(device)
 
         context.position_ids = position_ids
+        _fill_cos_sin(context, model_config, position_ids, device, x.dtype)
         attention_mask = create_causal_attention_mask(
             x.shape[1], x.device, x.dtype
         )

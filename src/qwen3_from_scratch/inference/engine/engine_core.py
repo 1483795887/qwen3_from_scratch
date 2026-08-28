@@ -1,6 +1,6 @@
 from qwen3_from_scratch.factory import BatchConfig
 from qwen3_from_scratch.inference.engine.entities import EngineStepOutput
-from qwen3_from_scratch.inference.model_worker import ModelWorker
+from qwen3_from_scratch.inference.model_runner.model_worker import ModelWorker
 from qwen3_from_scratch.inference.scheduler import Scheduler, SchedulerConfig
 from qwen3_from_scratch.inference.sequence import Sequence, SequenceStatus
 from qwen3_from_scratch.utils.logger import get_logger
@@ -34,7 +34,7 @@ class EngineCore:
         self.eos_token_id = eos_token_id
 
         self.worker = ModelWorker(config, self.model_name)
-        self.worker.init_context()
+        self.worker.warmup()
 
         self.scheduler = Scheduler(
             build_scheduler_config_from_batch_config(

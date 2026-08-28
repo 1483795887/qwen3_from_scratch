@@ -369,13 +369,25 @@ class VarLenPagedAttn(MyAttn):
             assert (
                 context.cum_seq_lens_kv.shape == context.cum_seq_lens_q.shape
             )
-            assert context.cum_seq_lens_q.shape[0] > 0
             assert isinstance(context.kv_cache, PagedKVCache)
             from qwen3_from_scratch.kernels.triton.paged_attn import (
+                flash_attn_decode_func,
                 flash_attn_varlen_func,
             )
 
             k_cache, v_cache = context.kv_cache.get(self.layer_idx)
+            scale = hidden_dim**-0.5
+
+            if context.use_decode_graph:
+                return flash_attn_decode_func(
+                    q,
+                    k_cache,
+                    v_cache,
+                    context.context_lens,
+                    scale,
+                    context.block_tables,
+                )
+            assert context.cum_seq_lens_q.shape[0] > 0
             cum_q = context.cum_seq_lens_q
             cum_kv = context.cum_seq_lens_kv
             if context.max_seqlen_q > 0:
@@ -385,7 +397,6 @@ class VarLenPagedAttn(MyAttn):
             else:
                 max_seqlen_q = int((cum_q[1:] - cum_q[:-1]).max())
                 max_seqlen_k = int((cum_kv[1:] - cum_kv[:-1]).max())
-            scale = hidden_dim**-0.5
             return flash_attn_varlen_func(
                 q,
                 k_cache,

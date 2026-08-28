@@ -8,6 +8,7 @@ from qwen3_from_scratch.inference.context import (
 )
 from qwen3_from_scratch.models.parameter_loader import ParameterLoader
 from qwen3_from_scratch.models.qwen3 import Qwen3
+from qwen3_from_scratch.models.rotary import build_cos_sin_table
 from qwen3_from_scratch.utils.env import load_env_file
 
 load_env_file()
@@ -25,6 +26,25 @@ _SMALL_MODEL_CONFIG = ModelConfig(
 )
 
 
+def _fill_cos_sin(
+    context: ModelContext,
+    config: ModelConfig,
+    position_ids: torch.Tensor,
+    device,
+    dtype,
+):
+    """按 position_ids 切片最大长度表填到 context.cos / context.sin。"""
+    cos_t, sin_t = build_cos_sin_table(
+        config.head_dim,
+        config.max_position_embeddings,
+        config.pos_embed_params["rope_theta"],
+        device,
+        dtype,
+    )
+    context.cos = cos_t[position_ids.reshape(-1).long()]
+    context.sin = sin_t[position_ids.reshape(-1).long()]
+
+
 def test_parameter_loading(real_model_config, real_model_path, device):
     pytest.skip("这个操作比较耗时，暂且跳过")
     loader = ParameterLoader()
@@ -34,15 +54,17 @@ def test_parameter_loading(real_model_config, real_model_path, device):
     x = torch.tensor([1, 2, 3, 4]).unsqueeze(0).to(device)
     context = ModelContext()
     context.dtype = torch.bfloat16
-    context.position_ids = torch.arange(0, x.shape[1]).unsqueeze(0).to(device)
+    position_ids = torch.arange(0, x.shape[1]).unsqueeze(0).to(device)
+    context.position_ids = position_ids
+    _fill_cos_sin(context, real_model_config, position_ids, device, x.dtype)
     set_forward_context(context)
     with torch.no_grad():
         y = model(x)
         assert y.shape == (1, 4, real_model_config.vocab_size)
 
 
-def test_qwen3_forward_requires_position_ids(device):
-    """Qwen3.forward 不设 position_ids 时应 assert 失败（RoPE 内部 assert）。"""
+def test_qwen3_forward_requires_cos_sin(device):
+    """Qwen3.forward 不设 context.cos / context.sin 时应 assert 失败。"""
     config = _SMALL_MODEL_CONFIG
     model = Qwen3(config).to(device)
     x = torch.tensor([1, 2, 3]).unsqueeze(0).to(device)
@@ -54,13 +76,15 @@ def test_qwen3_forward_requires_position_ids(device):
 
 
 def test_qwen3_forward_with_position_ids(device):
-    """Qwen3.forward 设 position_ids 后正常输出。"""
+    """Qwen3.forward 设 position_ids + cos/sin 后正常输出。"""
     config = _SMALL_MODEL_CONFIG
     model = Qwen3(config).to(device)
     x = torch.tensor([1, 2, 3]).unsqueeze(0).to(device)
     context = ModelContext()
     context.dtype = torch.float32
-    context.position_ids = torch.arange(0, x.shape[1]).unsqueeze(0).to(device)
+    position_ids = torch.arange(0, x.shape[1]).unsqueeze(0).to(device)
+    context.position_ids = position_ids
+    _fill_cos_sin(context, config, position_ids, device, x.dtype)
     set_forward_context(context)
     with torch.no_grad():
         y = model(x)
