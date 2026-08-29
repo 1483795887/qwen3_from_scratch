@@ -1,10 +1,9 @@
 from typing import Optional
 
 import torch
+import torch.nn.functional as F
 import triton
 import triton.language as tl
-
-from qwen3_from_scratch.kernels.triton.gemm import linear
 
 
 @triton.jit
@@ -158,45 +157,104 @@ def swiglu_gate(
     tl.store(up_embed + n_id * D * 2 + offsets, items_up, offsets < D)
 
 
+@triton.jit
+def fused_upgate_silu(
+    x,
+    up_proj_weight,
+    gate_proj_weight,
+    output,
+    M,
+    N: tl.constexpr,
+    D: tl.constexpr,
+    BLOCK_M: tl.constexpr,
+    BLOCK_N: tl.constexpr,
+    BLOCK_K: tl.constexpr,
+):
+    """up/gate 两 GEMM 融合 + silu 相乘：out = up(x) * silu(gate(x))，一次 x 读、
+    只写 (M, D1) 激活中间"""
+    pid_m = tl.program_id(0)
+    pid_n = tl.program_id(1)
+    offs_m = pid_m * BLOCK_M + tl.arange(0, BLOCK_M)
+    offs_n = pid_n * BLOCK_N + tl.arange(0, BLOCK_N)
+    offs_k = tl.arange(0, BLOCK_K)
+    x_ptrs = x + offs_m[:, None] * D + offs_k[None, :]
+    up_ptrs = up_proj_weight + offs_n[None, :] * D + offs_k[:, None]
+    gt_ptrs = gate_proj_weight + offs_n[None, :] * D + offs_k[:, None]
+    acc_up = tl.zeros((BLOCK_M, BLOCK_N), dtype=tl.float32)
+    acc_gt = tl.zeros((BLOCK_M, BLOCK_N), dtype=tl.float32)
+    for k in range(0, D, BLOCK_K):
+        a = tl.load(x_ptrs, mask=offs_m[:, None] < M, other=0.0)
+        b_u = tl.load(up_ptrs, mask=offs_n[None, :] < N, other=0.0)
+        b_g = tl.load(gt_ptrs, mask=offs_n[None, :] < N, other=0.0)
+        acc_up = tl.dot(a, b_u, acc_up)
+        acc_gt = tl.dot(a, b_g, acc_gt)
+        x_ptrs += BLOCK_K
+        up_ptrs += BLOCK_K
+        gt_ptrs += BLOCK_K
+    w_dtype = x.dtype.element_ty
+    # 对齐 base 数值语义：gate/up 先落 bf16（等价 F.linear 输出）再 silu/乘，
+    # 与 torch 的 bf16 激活路径一致（fp32 累加器直接 silu 会偏离 ~6e-4）
+    g_bf16 = acc_gt.to(w_dtype)
+    u_bf16 = acc_up.to(w_dtype)
+    g_bf16 = (g_bf16.to(tl.float32) * tl.sigmoid(g_bf16.to(tl.float32))).to(
+        w_dtype
+    )
+    res = (u_bf16 * g_bf16).to(output.dtype.element_ty)
+    out_ptrs = output + offs_m[:, None] * N + offs_n[None, :]
+    tl.store(out_ptrs, res, mask=offs_m[:, None] < M)
+
+
 def simple_swiglu(
     x: torch.Tensor,
-    merged_weight: torch.Tensor,
+    up_proj_weight: torch.Tensor,
+    gate_proj_weight: torch.Tensor,
     down_proj_weight: torch.Tensor,
-    output: torch.Tensor,
     residual: Optional[torch.Tensor] = None,
-):
+) -> torch.Tensor:
     D = x.shape[-1]
-    D1, _ = merged_weight.shape
-    assert D1 % 2 == 0
-    assert merged_weight.shape == (D1, D), (
-        f"merged_weight shape mismatch: expected {(D1, D)}, got {merged_weight.shape}"
+    D1, _ = up_proj_weight.shape
+    assert down_proj_weight.shape == (D, D1), (
+        f"down_proj_weight shape mismatch: expected {(D, D1)}, got "
+        "{down_proj_weight.shape}"
     )
-    assert down_proj_weight.shape == (D, D1 // 2), (
-        f"down_proj_weight shape mismatch: expected {(D, D1 // 2)}, got {down_proj_weight.shape}"
-    )
-    assert output.shape == x.shape, (
-        f"output shape mismatch: expected {x.shape}, got {output.shape}"
-    )
-    # 简单起见要求连续
     assert x.is_contiguous(), "x must be contiguous"
-    assert merged_weight.is_contiguous(), "merged_weight must be contiguous"
+    assert up_proj_weight.is_contiguous(), "up_proj_weight must be contiguous"
+    assert gate_proj_weight.is_contiguous(), (
+        "gate_proj_weight must be contiguous"
+    )
     assert down_proj_weight.is_contiguous(), (
         "down_proj_weight must be contiguous"
     )
-    assert output.is_contiguous(), "output must be contiguous"
+    BLOCK_M, BLOCK_N, BLOCK_K = 64, 64, 64
+    out_shape = x.shape[:-1] + (down_proj_weight.shape[0],)
     M = x.numel() // D
-    merged_embed = torch.empty(M, D1, dtype=x.dtype, device=x.device)
-    linear(x, merged_weight, merged_embed)
-    split_D = D1 // 2
-    up_embed, gate_embed = torch.split(
-        merged_embed, [split_D, split_D], dim=-1
+    x = x.view(M, D)
+    out = torch.empty(M, D1, dtype=x.dtype, device=x.device)
+    grid = (
+        triton.cdiv(
+            M,
+            BLOCK_M,
+        ),
+        triton.cdiv(D1, BLOCK_N),
     )
-    BLOCK_SIZE_D = 128
-
-    grid = [triton.cdiv(split_D, BLOCK_SIZE_D), M]
-    swiglu_gate[grid](up_embed, gate_embed, M, split_D, BLOCK_SIZE_D)
-
-    linear(up_embed, down_proj_weight, output, bias=residual)
+    fused_upgate_silu[grid](
+        x,
+        up_proj_weight,
+        gate_proj_weight,
+        out,
+        M,
+        D1,
+        D,
+        BLOCK_M,
+        BLOCK_N,
+        BLOCK_K,
+    )
+    res = F.linear(
+        out,
+        down_proj_weight,
+        bias=residual.view(M, D) if residual is not None else None,
+    )
+    return res.view(out_shape)
 
 
 class StandardSwiglu(torch.nn.Module):

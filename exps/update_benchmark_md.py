@@ -11,10 +11,20 @@
 """
 import argparse
 import json
+import subprocess
 import sys
 from pathlib import Path
 
 PREFERRED_RUN = "parallel_20_number_200"
+
+
+def get_latest_commit_hash() -> str:
+    """获取当前 git 仓库最新的 commit hash（短格式）。"""
+    result = subprocess.run(
+        ["git", "rev-parse", "--short", "HEAD"],
+        capture_output=True, text=True, check=True,
+    )
+    return result.stdout.strip()
 
 
 def find_run_dir(out_root: Path) -> Path:
@@ -116,7 +126,7 @@ def main():
         help="测速输出根目录，默认 outputs，自动取其中最新的一次",
     )
     ap.add_argument(
-        "--label", default="本框架", help="结果表中的版本标签，默认「本框架」"
+        "--label", default=None, help="结果表中的版本标签，默认使用最新 git commit hash"
     )
     ap.add_argument(
         "--write",
@@ -132,12 +142,13 @@ def main():
     args = ap.parse_args()
 
     run_dir = find_latest_run(args.outputs)
-    row = fmt_row(args.label, load_metrics(run_dir))
+    label = args.label or get_latest_commit_hash()
+    row = fmt_row(label, load_metrics(run_dir))
     print(row)
     print(f"# 数据来源: {run_dir}")
 
     if args.write:
-        action, content = update_table(args.markdown, args.label, row)
+        action, content = update_table(args.markdown, label, row)
         args.markdown.write_text(content)
         print(f"[{action}] {args.markdown}")
 

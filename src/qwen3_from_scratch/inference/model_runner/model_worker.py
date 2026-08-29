@@ -245,14 +245,15 @@ class ModelWorker:
     @torch.inference_mode
     def forward(self, seqs: list[Sequence]):
         assert len(seqs)
-        self.build_context(seqs)
-        inputs = self.build_inputs(seqs)
-
-        # 每条序列取自身 query 区间最后一个 token 的 logits
-        context = get_forward_context()
-        if context.use_decode_graph:
-            logits = self.replay_cuda_graph(inputs)
+        is_pure_decode = all(not seq.is_prefill for seq in seqs)
+        if is_pure_decode and self._should_use_cuda_graph(seqs):
+            logits = self.replay_cuda_graph(seqs)
         else:
+            self.build_context(seqs)
+            inputs = self.build_inputs(seqs)
+
+            # 每条序列取自身 query 区间最后一个 token 的 logits
+            context = get_forward_context()
             indices = context.cum_seq_lens_q[1:] - 1
             hidden = self.model.forward_hidden(inputs)
             # 只用算最后一个词元的logits
@@ -262,22 +263,48 @@ class ModelWorker:
         return next_ids[:, 0].tolist()  # length B
 
     @torch.inference_mode
-    def replay_cuda_graph(self, inputs: torch.Tensor):
-        bs = inputs.size(0)
-        context = get_forward_context()
+    def replay_cuda_graph(self, seqs: list[Sequence]):
+        bs = len(seqs)
         graph = self.graphs[next(x for x in self.graph_bs if x >= bs)]
         graph_vars = self.graph_vars
-        graph_vars["input_ids"][:bs] = inputs
-        graph_vars["block_tables"][:bs, : context.block_tables.size(1)] = (
-            context.block_tables
+
+        graph_vars["input_ids"][:bs].copy_(
+            torch.tensor(
+                [s.token_ids[-1] for s in seqs],
+                dtype=torch.int32,
+                device=self.device,
+            )
         )
-        graph_vars["context_lens"].zero_()
-        graph_vars["context_lens"][:bs] = context.context_lens
-        graph_vars["cos"][:bs] = context.cos
-        graph_vars["sin"][:bs] = context.sin
-        graph_vars["position_ids"][:bs] = context.position_ids
+        lens = [len(s) for s in seqs]
+        graph_vars["context_lens"].fill_(1)
+        graph_vars["context_lens"][:bs].copy_(
+            torch.tensor(lens, dtype=torch.int32, device=self.device)
+        )
+        graph_vars["position_ids"][:bs].copy_(
+            torch.tensor(
+                [le - 1 for le in lens], dtype=torch.int32, device=self.device
+            )
+        )
+        slots = []
+        block_size = self.kv_cache.block_size
+        for s, le in zip(seqs, lens):
+            p = le - 1
+            slots.append(
+                s.block_tables[p // block_size] * block_size + p % block_size
+            )
+
         graph_vars["slot_mapping"].fill_(-1)
-        graph_vars["slot_mapping"][:bs] = context.slot_mapping
+        graph_vars["slot_mapping"][:bs].copy_(
+            torch.tensor(slots, dtype=torch.int32, device=self.device)
+        )
+        max_blocks = max(len(s.block_tables) for s in seqs)
+        padded = [
+            s.block_tables + [-1] * (max_blocks - len(s.block_tables))
+            for s in seqs
+        ]
+        graph_vars["block_tables"][:bs, :max_blocks] = torch.tensor(
+            padded, device=self.device, dtype=torch.int32
+        )
         graph.replay()
         return self.model.compute_logits(graph_vars["outputs"][:bs])
 
@@ -328,7 +355,9 @@ class ModelWorker:
             dtype=model_info.dtype,
             device=self.device,
         )
-        self.graph_bs = [1, 2, 4, 8] + list(range(16, max_bs + 1, 16))
+        self.graph_bs = [1, 2, 4, 8, 12, 16, 20, 24, 28] + list(
+            range(32, max_bs + 1, 16)
+        )
 
         context = get_forward_context()
         logger.info("记录 Cuda 图中")
@@ -362,6 +391,8 @@ class ModelWorker:
             context.position_ids = positions[:bs]
             context.slot_mapping = slot_mappings[:bs]
             with torch.cuda.graph(graph, self.graph_pool):
+                cos[:bs] = self._cos_table[positions[:bs]]
+                sin[:bs] = self._sin_table[positions[:bs]]
                 outputs[:bs] = self.model.forward_hidden(input_ids[:bs])
             if self.graph_pool is None:
                 self.graph_pool = graph.pool()

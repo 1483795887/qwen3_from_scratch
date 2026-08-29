@@ -39,6 +39,13 @@ bash exps/run_eval_scope_bench.sh
 
 负载为 **20 并发 × 200 请求**，每条请求 512 input + 512 output tokens，流式输出（`--extra-args '{"ignore_eos":true}'` 保证每条固定输出 512 tokens）。结果输出到 `outputs/<时间戳>/qwen3-0.6b/performance_summary.txt`。
 
+脚本会在开跑前把实验现场存档到 `outputs/<时间戳>/`，用于事后复现每次测速对应的参数与环境（`batch2.yaml` 不入 git，且可能在中途被改过）：
+
+- `batch2.yaml` — 服务端配置副本
+- `git_state.txt` — 当前分支、commit、未提交改动（`git diff`，不含 uv.lock）
+- `nvidia_smi.txt` — GPU 时钟/温度/显存与占用显存的进程（排查孤儿进程干扰）
+- `server_process.txt` — 当时在跑的服务进程及其启动命令（可能为空，如测 vLLM 时）
+
 ## 3. 测本框架
 
 启动方式见 [examples.md](examples.md) 的「OpenAI 兼容服务器」一章，使用真实模型：
@@ -66,9 +73,13 @@ uv run examples/server.py --config_path examples/configs/batch2_example.yaml --m
 | 8fcdd87d16e980564cced4cdf380cd9e7f3ca580 | 980.60 | 1.92 | 10.433 | 10.39 | 11.08 | 15.2 | 12.3 | 20.4 | 21.6 | 100% |
 | 2ebeac0af312640aa4f28466d0b14176a670b649 | 1089.31 | 2.13 | 9.394 | 9.35 | 10.20 | 13.8 | 11.6 | 18.4 | 19.9 | 100% |
 | f557033f85c172e5292f2190085c34e222bd49c6 | 1092.26 | 2.13 | 9.368 | 9.35 | 9.88 | 196.2 | 189.3 | 17.9 | 18.3 | 100% |
+| 776978d | 1396.37 | 2.73 | 7.328 | 7.32 | 7.74 | 176.3 | 168.9 | 14.0 | 14.3 | 100% |
+| abe7ff2 | 1423.28 | 2.78 | 7.189 | 7.19 | 7.53 | 177.3 | 171.2 | 13.7 | 14.0 | 100% |
 
 > 049da8c311852443b3cf1b4d4604223b02fe73ea 之前的测试结果结果没有返回usage，深度思考部分没有被统计进去，吞吐量估算偏低，但相对的改进是有效的
+
 > f8cd8100eb64204ff6dc394702e7db2e3ec4737b 及之后使用 90% 的显存水位，预留10%给解码使用
+
 > f557033f85c172e5292f2190085c34e222bd49c6 之前的TTFT计算都是不正确的，直接忽略
 
 vLLM 基准为单次测速（总时长 71.14s，共生成 102,400 tokens），原始数据在本机 `outputs/<时间戳>/qwen3-0.6b/` 下（该目录不入库）。
