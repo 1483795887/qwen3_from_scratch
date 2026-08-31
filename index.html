@@ -1,0 +1,315 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Qwen3 from Scratch — 从零开始写一个 Qwen3 模型</title>
+<meta name="description" content="一个从零开始实现的 Qwen3 大语言模型，手写 CUDA/Triton 算子，完整推理流程，性能接近 vLLM 基准。">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="styles.css">
+</head>
+<body>
+
+<!-- ── Nav ─────────────────────────────────────────── -->
+
+<nav class="nav">
+  <div class="container nav-inner">
+    <a href="#" class="brand">qwen3<span>.</span>from_scratch</a>
+    <div class="nav-links">
+      <a href="#architecture">架构</a>
+      <a href="#features">特性</a>
+      <a href="#performance">性能</a>
+      <a href="#quickstart">快速开始</a>
+      <a href="#blog">博客</a>
+    </div>
+  </div>
+</nav>
+
+<!-- ── Hero ─────────────────────────────────────────── -->
+
+<section class="hero">
+  <div class="container">
+    <div class="hero-label">Open Source · Research Project</div>
+    <h1>
+      从零实现一个<br>
+      <span class="accent">Qwen3</span> 大语言模型
+    </h1>
+    <p class="hero-desc">
+      手写 CUDA / Triton 算子，完整推理流程，PagedAttention 显存管理，CUDA Graph 加速。
+      不是包装 vLLM，而是自己造一遍轮子。
+    </p>
+
+    <div class="hero-cta">
+      <a class="btn btn-primary" href="https://github.com/" target="_blank" rel="noopener">View on GitHub →</a>
+      <a class="btn btn-ghost" href="#architecture">查看架构</a>
+    </div>
+
+    <div class="hero-code reveal">
+      <div class="hero-code-header">
+        <div class="dot"></div><div class="dot"></div><div class="dot"></div>
+        <span>llm_example.py</span>
+      </div>
+<pre><code><span class="kw">from</span> qwen3_from_scratch.inference.llm.llm <span class="kw">import</span> LLM
+
+<span class="fn">llm</span> = <span class="kw">LLM</span>(<span class="str">"config.yaml"</span>, <span class="str">"qwen3-0.6b"</span>)
+llm.<span class="fn">warmup</span>()
+
+<span class="fn">print</span>(llm.<span class="fn">generate</span>(
+    [{<span class="str">"role"</span>: <span class="str">"user"</span>, <span class="str">"content"</span>: <span class="str">"介绍一下你自己"</span>}],
+))
+<span class="cm"># → 你好，我是 Qwen3 模型...</span></code></pre>
+    </div>
+  </div>
+</section>
+
+<!-- ── Architecture ─────────────────────────────────── -->
+
+<section class="section" id="architecture">
+  <div class="container">
+    <div class="section-label">01 · Runtime</div>
+    <h2 class="section-title">运行时架构</h2>
+    <p class="section-desc">
+      从 User prompt 到 GPU CUDA kernel 的完整链路。Host 侧负责调度、批处理和显存分配；Device 侧执行模型前向和 Triton 算子。
+    </p>
+
+    <div class="arch-wrap reveal">
+      <iframe class="arch-frame" src="runtime-architecture.html" title="Qwen3 Runtime Architecture"></iframe>
+    </div>
+  </div>
+</section>
+
+<!-- ── Features ─────────────────────────────────────── -->
+
+<section class="section" id="features">
+  <div class="container">
+    <div class="section-label">02 · What's Inside</div>
+    <h2 class="section-title">三层核心实现</h2>
+    <p class="section-desc">
+      模型结构、CUDA 算子、推理引擎，三个层次都自己写一遍。
+    </p>
+
+    <div class="features reveal">
+      <div class="feature">
+        <h3><span class="idx">MODEL</span> · 模型架构</h3>
+        <p>完整实现 Qwen3 结构，模块化设计，可通过 ComponentFactory 切换不同实现。</p>
+        <ul>
+          <li>Embedding + Transformer Blocks + RMS Norm</li>
+          <li>RoPE 旋转位置编码</li>
+          <li>MLP with SwiGLU</li>
+          <li>支持加载 HuggingFace 预训练权重</li>
+        </ul>
+      </div>
+      <div class="feature">
+        <h3><span class="idx">KERNELS</span> · CUDA / Triton 算子</h3>
+        <p>手写高性能 GPU 算子，减少显存访问和 kernel launch 开销。</p>
+        <ul>
+          <li>RMS Norm 融合算子</li>
+          <li>PagedAttention Triton 实现</li>
+          <li>Fused RMSNorm + Linear</li>
+          <li>KV Cache 写回算子</li>
+        </ul>
+      </div>
+      <div class="feature">
+        <h3><span class="idx">ENGINE</span> · 推理引擎</h3>
+        <p>PagedAttention 显存管理 + CUDA Graph 加速 + 混合 batch 调度。</p>
+        <ul>
+          <li>FCFS 调度 + Watermark 水位限制</li>
+          <li>Chunked Prefill + 请求抢占</li>
+          <li>Prefix Cache 跨请求 KV 共享</li>
+          <li>CUDA Graph Capture / Replay</li>
+        </ul>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- ── Performance ──────────────────────────────────── -->
+
+<section class="section" id="performance">
+  <div class="container">
+    <div class="section-label">03 · Benchmark</div>
+    <h2 class="section-title">性能演进</h2>
+    <p class="section-desc">
+      20 并发 × 200 请求，512 input + 512 output tokens（ignore_eos）。
+      从基础实现到接近 vLLM 基准，每一行都是一次真实的优化提交。
+    </p>
+
+    <div class="perf-table-wrap reveal">
+      <table class="perf-table">
+        <thead>
+          <tr>
+            <th>版本</th>
+            <th>Output tok/s</th>
+            <th>req/s</th>
+            <th>延迟 avg (s)</th>
+            <th>延迟 p99 (s)</th>
+            <th>TTFT avg (ms)</th>
+            <th>TPOT p99 (ms)</th>
+          </tr>
+        </thead>
+        <tbody>
+          <tr class="baseline">
+            <td>vLLM 0.15.1 基准</td>
+            <td>1439.41</td>
+            <td>2.81</td>
+            <td>7.109</td>
+            <td>7.30</td>
+            <td>314.8</td>
+            <td>13.8</td>
+          </tr>
+          <tr class="ours">
+            <td class="vers">基础实现</td>
+            <td>428.68</td><td>0.92</td><td>21.78</td><td>22.71</td>
+            <td>22.2</td><td>381.3</td>
+          </tr>
+          <tr class="ours">
+            <td class="vers">去除重复计算 · 全局上下文</td>
+            <td>712.81</td><td>1.49</td><td>13.40</td><td>14.21</td>
+            <td>21.9</td><td>321.7</td>
+          </tr>
+          <tr class="ours">
+            <td class="vers">解码专用 PagedAttn 内核</td>
+            <td>863.98</td><td>1.69</td><td>11.84</td><td>12.29</td>
+            <td>11.1</td><td>24.0</td>
+          </tr>
+          <tr class="ours">
+            <td class="vers">重构调度框架 · 同进程</td>
+            <td>980.60</td><td>1.92</td><td>10.43</td><td>11.08</td>
+            <td>15.2</td><td>21.6</td>
+          </tr>
+          <tr class="ours">
+            <td class="vers">保持 CUDA Graph</td>
+            <td>1092.26</td><td>2.13</td><td>9.37</td><td>9.88</td>
+            <td>196.2</td><td>18.3</td>
+          </tr>
+          <tr class="ours">
+            <td class="vers">MLP 融合</td>
+            <td class="best">1423.28</td><td class="best">2.78</td><td>7.19</td><td>7.53</td>
+            <td>177.3</td><td class="best">14.0</td>
+          </tr>
+        </tbody>
+      </table>
+    </div>
+  </div>
+</section>
+
+<!-- ── Quick Start ──────────────────────────────────── -->
+
+<section class="section" id="quickstart">
+  <div class="container">
+    <div class="section-label">04 · Get Started</div>
+    <h2 class="section-title">快速上手</h2>
+    <p class="section-desc">三步跑起来：装依赖 → 编译算子 → 加载模型。</p>
+
+    <div class="qs-grid reveal">
+      <div class="qs-nav">
+        <button class="active" data-tab="install">安装</button>
+        <button data-tab="build">编译</button>
+        <button data-tab="run">运行</button>
+      </div>
+      <div class="qs-content">
+<pre data-content="install"><code><span class="cm"># 使用 uv 管理依赖</span>
+<span class="sh">uv</span> sync --index-url https://pypi.tuna.tsinghua.edu.cn/simple
+<span class="sh">uv</span> pip install -e .
+
+<span class="cm"># 下载模型权重到本地</span>
+<span class="cm"># 编辑 .env 设置 MODEL_PATH</span></code></pre>
+<pre data-content="build" hidden><code><span class="sh">cmake</span> -B build
+<span class="sh">cmake</span> --build build
+
+<span class="cm"># 编译完成后，kernels/ 下会生成 ops 动态链接库</span>
+<span class="kw">from</span> qwen3_from_scratch.kernels <span class="kw">import</span> ops</code></pre>
+<pre data-content="run" hidden><code><span class="kw">from</span> qwen3_from_scratch.inference.llm.llm <span class="kw">import</span> LLM
+
+<span class="fn">llm</span> = <span class="kw">LLM</span>(<span class="str">"config.yaml"</span>, <span class="str">"qwen3-0.6b"</span>)
+llm.<span class="fn">warmup</span>()
+
+<span class="fn">print</span>(llm.<span class="fn">generate</span>(<span class="str">"你好"</span>))</code></pre>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- ── Blog ─────────────────────────────────────────── -->
+
+<section class="section" id="blog">
+  <div class="container">
+    <div class="section-label">05 · Blog</div>
+    <h2 class="section-title">从零开始写 Qwen3</h2>
+    <p class="section-desc">系列博客，记录每一个实现决策和踩过的坑。</p>
+
+    <ul class="blog-list reveal">
+      <li><span class="num">01</span><a href="https://blog.csdn.net/qq_43491590/article/details/158810975" target="_blank" rel="noopener">模型结构分析</a><span class="arrow">→</span></li>
+      <li><span class="num">02</span><a href="https://blog.csdn.net/qq_43491590/article/details/158836521" target="_blank" rel="noopener">快速搭建 Qwen3</a><span class="arrow">→</span></li>
+      <li><span class="num">03</span><a href="https://blog.csdn.net/qq_43491590/article/details/158878111" target="_blank" rel="noopener">KV Cache 实现</a><span class="arrow">→</span></li>
+      <li><span class="num">04</span><a href="https://blog.csdn.net/qq_43491590/article/details/158886858" target="_blank" rel="noopener">RMSNorm 算子实现</a><span class="arrow">→</span></li>
+      <li><span class="num">05</span><a href="https://blog.csdn.net/qq_43491590/article/details/160286002" target="_blank" rel="noopener">Triton 版 RMSNorm</a><span class="arrow">→</span></li>
+      <li><span class="num">06</span><a href="https://blog.csdn.net/qq_43491590/article/details/160508208" target="_blank" rel="noopener">Triton 自注意力</a><span class="arrow">→</span></li>
+      <li><span class="num">07</span><a href="https://blog.csdn.net/qq_43491590/article/details/160601892" target="_blank" rel="noopener">FlashAttention 实现</a><span class="arrow">→</span></li>
+      <li><span class="num">08</span><a href="https://blog.csdn.net/qq_43491590/article/details/163705719" target="_blank" rel="noopener">PagedAttention</a><span class="arrow">→</span></li>
+      <li><span class="num">09</span><a href="https://blog.csdn.net/qq_43491590/article/details/163922110" target="_blank" rel="noopener">手写推理引擎</a><span class="arrow">→</span></li>
+    </ul>
+  </div>
+</section>
+
+<!-- ── Footer ────────────────────────────────────────── -->
+
+<footer class="footer">
+  <div class="container">
+    <div class="footer-inner">
+      <div class="footer-brand">
+        <a href="#" class="brand">qwen3<span>.</span>from_scratch</a>
+        <p>一个研究项目，记录从零实现 LLM 推理引擎的完整过程。</p>
+      </div>
+      <div class="footer-col">
+        <h4>Project</h4>
+        <a href="https://github.com/" target="_blank" rel="noopener">GitHub</a>
+        <a href="#architecture">架构</a>
+        <a href="#performance">性能</a>
+      </div>
+      <div class="footer-col">
+        <h4>Docs</h4>
+        <a href="#quickstart">快速开始</a>
+        <a href="#blog">博客</a>
+        <a href="#">参考</a>
+      </div>
+      <div class="footer-col">
+        <h4>References</h4>
+        <a href="https://github.com/huggingface/transformers" target="_blank" rel="noopener">transformers</a>
+        <a href="https://github.com/ggml-org/llama.cpp" target="_blank" rel="noopener">llama.cpp</a>
+        <a href="https://github.com/GeeeekExplorer/nano-vllm" target="_blank" rel="noopener">nano-vllm</a>
+      </div>
+    </div>
+    <div class="footer-bottom">© Qwen3 from Scratch · Built with PyTorch + Triton</div>
+  </div>
+</footer>
+
+<script>
+// Reveal on scroll
+const io = new IntersectionObserver((entries) => {
+  entries.forEach(e => {
+    if (e.isIntersecting) {
+      e.target.classList.add('in');
+      io.unobserve(e.target);
+    }
+  });
+}, { threshold: 0.15 });
+document.querySelectorAll('.reveal').forEach(el => io.observe(el));
+
+// Quick Start tabs
+document.querySelectorAll('.qs-nav button').forEach(btn => {
+  btn.addEventListener('click', () => {
+    document.querySelectorAll('.qs-nav button').forEach(b => b.classList.remove('active'));
+    btn.classList.add('active');
+    const tab = btn.dataset.tab;
+    document.querySelectorAll('.qs-content pre').forEach(pre => {
+      pre.hidden = pre.dataset.content !== tab;
+    });
+  });
+});
+</script>
+
+</body>
+</html>
