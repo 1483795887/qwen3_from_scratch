@@ -75,6 +75,10 @@ llm.<span class="fn">warmup</span>()
     </p>
 
     <div class="arch-wrap reveal">
+      <button class="arch-fullscreen" id="archFullscreen" type="button" title="全屏查看" aria-label="全屏查看架构图">
+        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M8 3H5a2 2 0 0 0-2 2v3"/><path d="M21 8V5a2 2 0 0 0-2-2h-3"/><path d="M3 16v3a2 2 0 0 0 2 2h3"/><path d="M16 21h3a2 2 0 0 0 2-2v-3"/></svg>
+        <span class="arch-fs-label">全屏</span>
+      </button>
       <iframe class="arch-frame" src="runtime-architecture.html" title="Qwen3 Runtime Architecture"></iframe>
     </div>
   </div>
@@ -311,6 +315,31 @@ document.querySelectorAll('.qs-nav button').forEach(btn => {
     });
   });
 });
+
+// Architecture fullscreen toggle
+(function () {
+  const fsBtn = document.getElementById('archFullscreen');
+  const archWrap = document.querySelector('.arch-wrap');
+  if (!fsBtn || !archWrap) return;
+  const label = fsBtn.querySelector('.arch-fs-label');
+  const isFs = () => !!(document.fullscreenElement || document.webkitFullscreenElement);
+  const syncLabel = () => {
+    const on = isFs();
+    if (label) label.textContent = on ? '退出' : '全屏';
+    fsBtn.title = on ? '退出全屏' : '全屏查看';
+  };
+  fsBtn.addEventListener('click', () => {
+    if (isFs()) {
+      (document.exitFullscreen || document.webkitExitFullscreen).call(document);
+    } else {
+      const el = archWrap;
+      (el.requestFullscreen || el.webkitRequestFullscreen).call(el);
+    }
+  });
+  document.addEventListener('fullscreenchange', syncLabel);
+  document.addEventListener('webkitfullscreenchange', syncLabel);
+  syncLabel();
+})();
 </script>
 
 </body>

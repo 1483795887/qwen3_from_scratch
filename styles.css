@@ -205,6 +205,7 @@ body::before {
 /* ── Architecture ────────────────────────────────────── */
 
 .arch-wrap {
+  position: relative;
   border-radius: 12px;
   overflow: hidden;
   border: 1px solid var(--line);
@@ -215,6 +216,43 @@ body::before {
   height: 720px;
   border: none;
   display: block;
+}
+.arch-fullscreen {
+  position: absolute;
+  top: 10px; right: 10px;
+  z-index: 5;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-family: var(--mono);
+  font-size: 12px;
+  color: var(--fg-dim);
+  background: rgba(19, 22, 26, 0.82);
+  border: 1px solid var(--line);
+  padding: 6px 10px;
+  border-radius: 6px;
+  cursor: pointer;
+  transition: color 0.2s, border-color 0.2s, background 0.2s;
+  -webkit-backdrop-filter: blur(4px);
+  backdrop-filter: blur(4px);
+}
+.arch-fullscreen:hover {
+  color: var(--fg);
+  border-color: var(--fg-mute);
+  background: rgba(26, 30, 36, 0.9);
+}
+.arch-fullscreen svg { display: block; }
+
+/* Fullscreen: iframe fills the screen */
+.arch-wrap:fullscreen,
+.arch-wrap:-webkit-full-screen {
+  border-radius: 0;
+  border: none;
+}
+.arch-wrap:fullscreen .arch-frame,
+.arch-wrap:-webkit-full-screen .arch-frame {
+  height: 100%;
+  width: 100%;
 }
 
 /* ── Features ────────────────────────────────────────── */
