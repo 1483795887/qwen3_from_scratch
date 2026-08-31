@@ -217,42 +217,91 @@ body::before {
   border: none;
   display: block;
 }
+.arch-bar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 8px 12px;
+  border-bottom: 1px solid var(--line);
+  background: var(--bg-elev);
+}
+.arch-bar-label {
+  font-family: var(--mono);
+  font-size: 12px;
+  color: var(--fg-mute);
+  letter-spacing: 0.02em;
+}
 .arch-fullscreen {
-  position: absolute;
-  top: 10px; right: 10px;
-  z-index: 5;
   display: inline-flex;
   align-items: center;
   gap: 6px;
   font-family: var(--mono);
   font-size: 12px;
   color: var(--fg-dim);
-  background: rgba(19, 22, 26, 0.82);
+  background: transparent;
   border: 1px solid var(--line);
-  padding: 6px 10px;
+  padding: 5px 10px;
   border-radius: 6px;
   cursor: pointer;
   transition: color 0.2s, border-color 0.2s, background 0.2s;
-  -webkit-backdrop-filter: blur(4px);
-  backdrop-filter: blur(4px);
 }
 .arch-fullscreen:hover {
   color: var(--fg);
   border-color: var(--fg-mute);
-  background: rgba(26, 30, 36, 0.9);
+  background: var(--bg-soft);
 }
 .arch-fullscreen svg { display: block; }
+.arch-credit {
+  margin: 12px 0 0;
+  font-family: var(--mono);
+  font-size: 12px;
+  color: var(--fg-mute);
+  text-align: right;
+}
+.arch-credit a {
+  color: var(--fg-dim);
+  text-decoration: none;
+  border-bottom: 1px solid transparent;
+  transition: color 0.2s, border-color 0.2s;
+}
+.arch-credit a:hover {
+  color: var(--fg);
+  border-bottom-color: var(--fg-mute);
+}
 
-/* Fullscreen: iframe fills the screen */
-.arch-wrap:fullscreen,
-.arch-wrap:-webkit-full-screen {
+/* Fullscreen overlay (.is-fs): a stable fixed layer instead of the
+   Fullscreen API, which triggered top-layer jitter. Bar on top, iframe
+   fills the rest. */
+.arch-wrap.is-fs {
+  position: fixed;
+  top: 0; left: 0;
+  width: 100%;
+  height: 100vh;
+  max-width: none;
+  z-index: 9999;
   border-radius: 0;
   border: none;
+  display: flex;
+  flex-direction: column;
+  background: var(--bg);
 }
-.arch-wrap:fullscreen .arch-frame,
-.arch-wrap:-webkit-full-screen .arch-frame {
-  height: 100%;
+.arch-wrap.is-fs .arch-frame {
+  flex: 1 1 0;
+  min-height: 0;
   width: 100%;
+}
+
+/* The overlay's ancestor `.container` has `position: relative; z-index: 1`,
+   which creates a stacking context that caps the overlay's z-index inside
+   it — so the sticky nav (z-index: 50) would paint above the "fullscreen"
+   layer. While the overlay is open, lift that ancestor above the nav and
+   lock background scrolling so the page really is hidden. */
+html.arch-fs-open #architecture .container {
+  z-index: 10000;
+}
+html.arch-fs-open {
+  overflow: hidden;
 }
 
 /* ── Features ────────────────────────────────────────── */
