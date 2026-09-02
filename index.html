@@ -4,7 +4,7 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Qwen3 from Scratch — 从零开始写一个 Qwen3 模型</title>
-<meta name="description" content="一个从零开始实现的 Qwen3 大语言模型，手写 CUDA/Triton 算子，完整推理流程，性能接近 vLLM 基准。">
+<meta name="description" content="一个从零开始实现的 Qwen3 大语言模型，手写 CUDA/Triton 算子，完整推理流程，性能反超 vLLM 基准。">
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
@@ -141,7 +141,7 @@ llm.<span class="fn">warmup</span>()
     <h2 class="section-title">性能演进</h2>
     <p class="section-desc">
       20 并发 × 200 请求，512 input + 512 output tokens（ignore_eos）。
-      从基础实现到接近 vLLM 基准，每一行都是一次真实的优化提交。
+      从基础实现到反超 vLLM 基准，每一行都是一次真实的优化提交。
     </p>
 
     <div class="perf-table-wrap reveal">
@@ -194,8 +194,13 @@ llm.<span class="fn">warmup</span>()
           </tr>
           <tr class="ours">
             <td class="vers">MLP 融合</td>
-            <td class="best">1423.28</td><td class="best">2.78</td><td>7.19</td><td>7.53</td>
-            <td>177.3</td><td class="best">14.0</td>
+            <td>1423.28</td><td>2.78</td><td>7.19</td><td>7.53</td>
+            <td>177.3</td><td>14.0</td>
+          </tr>
+          <tr class="ours">
+            <td class="vers">锁页内存加速 CUDA Graph 输入</td>
+            <td class="best">1452.23</td><td class="best">2.84</td><td>7.05</td><td>7.41</td>
+            <td>176.5</td><td class="best">13.8</td>
           </tr>
         </tbody>
       </table>
