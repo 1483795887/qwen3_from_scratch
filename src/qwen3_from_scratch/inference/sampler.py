@@ -44,13 +44,9 @@ class TopKSampler(Sampler):
     def forward(self, logits: torch.Tensor) -> torch.Tensor:
         top_logits, top_indices = torch.topk(logits, self.top_k, dim=-1)
         min_val = top_logits[:, -1].unsqueeze(-1)
-        top_logits = torch.where(
-            top_logits < min_val,
-            torch.tensor(
-                float("-inf"), device=logits.device, dtype=logits.dtype
-            ),
-            top_logits,
-        )
+        # masked_fill 而非 torch.where(-inf 张量)：标量经 kernel 参数传入，
+        # 不会在 CUDA graph 捕获期间触发 pageable H2D 拷贝（会作废 capture）
+        top_logits = top_logits.masked_fill(top_logits < min_val, float("-inf"))
         probs = torch.softmax(top_logits / self.temperature, dim=-1)
         sampled = torch.multinomial(probs, num_samples=1)
         return top_indices.gather(1, sampled)
