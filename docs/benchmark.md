@@ -2,6 +2,16 @@
 
 使用 [evalscope](https://github.com/modelscope/evalscope) 压测本框架与 vLLM 的 OpenAI 兼容 API，在相同负载下对比吞吐与延迟。
 
+## 测试环境
+
+| 类别 | 配置 |
+|---|---|
+| 宿主系统 | Windows 11 25H2（内部版本 26200.9168） |
+| WSL | WSL2，内核 6.6.87.2-microsoft-standard-WSL2，发行版 Ubuntu 22.04.5 LTS |
+| GPU | NVIDIA GeForce RTX 3060（12GB），驱动 596.36（WSL 侧 595.71.01，nvidia-smi 报告 CUDA 13.2） |
+| 本框架环境（`.venv`，Python 3.13.5） | PyTorch 2.10.0+cu128（CUDA 12.8）、Triton 3.6.0，另有本地 nvcc 12.4 用于编译 CUDA 算子 |
+| 测速环境（`.venv-vllm`，Python 3.13.5） | vLLM 0.15.1（PyTorch 2.9.1+cu128）、evalscope 1.10.0 |
+
 ## 环境准备
 
 vLLM 与本框架的依赖互不兼容，需要另起一个独立的虚拟环境，仅安装 vllm 与 evalscope：
