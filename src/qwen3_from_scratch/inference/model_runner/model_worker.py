@@ -247,6 +247,7 @@ class ModelWorker:
         assert len(seqs)
         is_pure_decode = all(not seq.is_prefill for seq in seqs)
         if is_pure_decode and self._should_use_cuda_graph(seqs):
+            # lm_head 已并入 decode graph，replay 直接返回 token ids
             logits = self.replay_cuda_graph(seqs)
         else:
             self.build_context(seqs)
@@ -258,8 +259,8 @@ class ModelWorker:
             hidden = self.model.forward_hidden(inputs)
             # 只用算最后一个词元的logits
             logits = self.model.compute_logits(hidden[indices])  # [B, vocabs]
-
         next_ids = self.sampler(logits)
+
         return next_ids[:, 0].tolist()  # length B
 
     @torch.inference_mode
@@ -267,46 +268,49 @@ class ModelWorker:
         bs = len(seqs)
         graph = self.graphs[next(x for x in self.graph_bs if x >= bs)]
         graph_vars = self.graph_vars
+        host = self._host_stage
+        host_np = self._host_np
 
-        graph_vars["input_ids"][:bs].copy_(
-            torch.tensor(
-                [s.token_ids[-1] for s in seqs],
-                dtype=torch.int32,
-                device=self.device,
-            )
-        )
         lens = [len(s) for s in seqs]
-        graph_vars["context_lens"].fill_(1)
-        graph_vars["context_lens"][:bs].copy_(
-            torch.tensor(lens, dtype=torch.int32, device=self.device)
-        )
-        graph_vars["position_ids"][:bs].copy_(
-            torch.tensor(
-                [le - 1 for le in lens], dtype=torch.int32, device=self.device
-            )
-        )
-        slots = []
         block_size = self.kv_cache.block_size
+        slots = []
         for s, le in zip(seqs, lens):
             p = le - 1
             slots.append(
                 s.block_tables[p // block_size] * block_size + p % block_size
             )
-
-        graph_vars["slot_mapping"].fill_(-1)
-        graph_vars["slot_mapping"][:bs].copy_(
-            torch.tensor(slots, dtype=torch.int32, device=self.device)
-        )
         max_blocks = max(len(s.block_tables) for s in seqs)
         padded = [
             s.block_tables + [-1] * (max_blocks - len(s.block_tables))
             for s in seqs
         ]
-        graph_vars["block_tables"][:bs, :max_blocks] = torch.tensor(
-            padded, device=self.device, dtype=torch.int32
+
+        # 纯 CPU 填充, 直接写入numpy 无 CUDA 调用
+        host_np["input_ids"][:bs] = [s.token_ids[-1] for s in seqs]
+        host_np["context_lens"][:bs] = lens
+        host_np["position_ids"][:bs] = [le - 1 for le in lens]
+        host_np["slot_mapping"][:bs] = slots
+        host_np["block_tables"][:bs, :max_blocks] = padded
+
+        graph_vars["slot_mapping"].fill_(-1)
+        graph_vars["context_lens"].fill_(1)
+        graph_vars["input_ids"][:bs].copy_(
+            host["input_ids"][:bs], non_blocking=True
+        )
+        graph_vars["context_lens"][:bs].copy_(
+            host["context_lens"][:bs], non_blocking=True
+        )
+        graph_vars["position_ids"][:bs].copy_(
+            host["position_ids"][:bs], non_blocking=True
+        )
+        graph_vars["slot_mapping"][:bs].copy_(
+            host["slot_mapping"][:bs], non_blocking=True
+        )
+        graph_vars["block_tables"][:bs, :max_blocks].copy_(
+            host["block_tables"][:bs, :max_blocks], non_blocking=True
         )
         graph.replay()
-        return self.model.compute_logits(graph_vars["outputs"][:bs])
+        return graph_vars["logits"][:bs]
 
     @torch.inference_mode()
     def capture_cudagraph(self):
@@ -340,6 +344,12 @@ class ModelWorker:
             dtype=self.dtype,
             device=self.device,
         )
+        logits = torch.zeros(
+            max_bs,
+            model_config.vocab_size,
+            dtype=self.dtype,
+            device=self.device,
+        )
         # cos/sin 占位：分配 max_bs 缓冲，capture 时按 positions[:bs]=0
         # 切片到 _cos_table / _sin_table 的 position-0 行 (cos=1, sin=0)，
         # 让 RoPE 在 capture 阶段是恒等映射；replay 时由 graph_vars["cos"/"sin"] 覆盖。
@@ -361,11 +371,12 @@ class ModelWorker:
 
         context = get_forward_context()
         logger.info("记录 Cuda 图中")
-        # 预热一次 forward：让 cuBLAS handle / cublasLt 等 lazy 库在 default stream
-        # 上完成初始化；进入 capture 后 cuBLAS 不会再次创建 handle，
-        # 避免 F.linear 触发 cudaErrorStreamCaptureInvalidated。
-        # 注意必须走 forward_hidden（与 capture 的入口一致），不能走 self.model(...)
-        # —— 后者还含 lm_head，算子集合比 capture 范围大，预热不全。
+        # 捕获阶段随机产生输入，防止计算出现异常，把kvcache清零
+        # 这是启动时做的，不影响推理
+        self.kv_cache.k_cache.zero_()
+        self.kv_cache.v_cache.zero_()
+        # 解码的长度都是1
+        context_lens.fill_(1)
         context.use_decode_graph = True
         context.block_tables = block_tables[:1]
         context.context_lens = context_lens[:1]
@@ -394,11 +405,28 @@ class ModelWorker:
                 cos[:bs] = self._cos_table[positions[:bs]]
                 sin[:bs] = self._sin_table[positions[:bs]]
                 outputs[:bs] = self.model.forward_hidden(input_ids[:bs])
+                logits[:bs] = self.model.compute_logits(outputs[:bs])
             if self.graph_pool is None:
                 self.graph_pool = graph.pool()
             self.graphs[bs] = graph
 
             torch.cuda.synchronize()
+        # 使用锁页内存加快H2D的复制速度
+        host_stage = {
+            name: torch.empty(max_bs, dtype=torch.int32, pin_memory=True)
+            for name in (
+                "input_ids",
+                "context_lens",
+                "position_ids",
+                "slot_mapping",
+            )
+        }
+        host_stage["block_tables"] = torch.empty(
+            (max_bs, max_num_blocks), dtype=torch.int32, pin_memory=True
+        )
+        self._host_stage = host_stage
+        self._host_np = {k: t.numpy() for k, t in host_stage.items()}
+
         return {
             "input_ids": input_ids,
             "block_tables": block_tables,
@@ -408,4 +436,5 @@ class ModelWorker:
             "position_ids": positions,
             "slot_mapping": slot_mappings,
             "outputs": outputs,
+            "logits": logits,
         }
